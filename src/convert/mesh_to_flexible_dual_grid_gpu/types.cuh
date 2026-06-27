@@ -38,6 +38,22 @@ namespace o_voxel::fdg
         float q33;
     };
 
+    inline constexpr int kBrickSize = 8;
+    inline constexpr int kBrickLocalCells = kBrickSize * kBrickSize * kBrickSize;
+    inline constexpr int kBrickBitWords = kBrickLocalCells / 32;
+    inline constexpr uint64_t kEmptyBrickKey = UINT64_MAX;
+    inline constexpr uint32_t kEmptyBrickVal = UINT32_MAX;
+    inline constexpr uint32_t kOverflowBrickVal = UINT32_MAX - 1u;
+
+    struct BrickLookup
+    {
+        const uint64_t *hash_keys;
+        const uint32_t *hash_vals;
+        const uint32_t *brick_bits;
+        const int64_t *brick_base;
+        uint64_t hash_capacity;
+    };
+
     __host__ __device__ __forceinline__ uint64_t pack_voxel_key(
         int x,
         int y,
@@ -70,6 +86,96 @@ namespace o_voxel::fdg
             static_cast<int>(y) + grid_min.y,
             static_cast<int>(z) + grid_min.z,
         };
+    }
+
+    __device__ __forceinline__ bool lookup_brick_bits_and_base(
+        int bx,
+        int by,
+        int bz,
+        GridSpec grid,
+        BrickLookup lookup,
+        const uint32_t **bits,
+        int64_t *base)
+    {
+        if (lookup.hash_capacity == 0)
+            return false;
+
+        const uint64_t nbx = static_cast<uint64_t>(
+            (grid.grid_max.x - grid.grid_min.x + kBrickSize - 1) / kBrickSize);
+        const uint64_t nby = static_cast<uint64_t>(
+            (grid.grid_max.y - grid.grid_min.y + kBrickSize - 1) / kBrickSize);
+        const uint64_t key =
+            static_cast<uint64_t>(bx) + nbx * (static_cast<uint64_t>(by) + nby * static_cast<uint64_t>(bz));
+
+        uint64_t slot_key = key;
+        slot_key ^= slot_key >> 33;
+        slot_key *= 0xff51afd7ed558ccdULL;
+        slot_key ^= slot_key >> 33;
+        slot_key *= 0xc4ceb9fe1a85ec53ULL;
+        slot_key ^= slot_key >> 33;
+
+        uint64_t slot = slot_key & (lookup.hash_capacity - 1);
+        for (uint64_t probe = 0; probe < lookup.hash_capacity; ++probe)
+        {
+            const uint64_t found = lookup.hash_keys[slot];
+            if (found == kEmptyBrickKey)
+                return false;
+            if (found == key)
+            {
+                const uint32_t brick_idx = lookup.hash_vals[slot];
+                if (brick_idx == kEmptyBrickVal || brick_idx == kOverflowBrickVal)
+                    return false;
+                *bits = lookup.brick_bits + static_cast<int64_t>(brick_idx) * kBrickBitWords;
+                *base = lookup.brick_base[brick_idx];
+                return true;
+            }
+            slot = (slot + 1u) & (lookup.hash_capacity - 1);
+        }
+        return false;
+    }
+
+    __device__ __forceinline__ int64_t lookup_voxel_row_in_bricks(
+        int x,
+        int y,
+        int z,
+        GridSpec grid,
+        BrickLookup lookup)
+    {
+        if (lookup.hash_capacity == 0)
+            return -1;
+        if (x < grid.grid_min.x || x >= grid.grid_max.x)
+            return -1;
+        if (y < grid.grid_min.y || y >= grid.grid_max.y)
+            return -1;
+        if (z < grid.grid_min.z || z >= grid.grid_max.z)
+            return -1;
+
+        const int rx = x - grid.grid_min.x;
+        const int ry = y - grid.grid_min.y;
+        const int rz = z - grid.grid_min.z;
+        const int bx = rx / kBrickSize;
+        const int by = ry / kBrickSize;
+        const int bz = rz / kBrickSize;
+        const int lx = rx - bx * kBrickSize;
+        const int ly = ry - by * kBrickSize;
+        const int lz = rz - bz * kBrickSize;
+        const int local_id = lx + kBrickSize * (ly + kBrickSize * lz);
+
+        const uint32_t *bits;
+        int64_t base;
+        if (!lookup_brick_bits_and_base(bx, by, bz, grid, lookup, &bits, &base))
+            return -1;
+        const int word = local_id / 32;
+        const int bit = local_id - word * 32;
+        if ((bits[word] & (1u << bit)) == 0)
+            return -1;
+
+        int rank = 0;
+        for (int i = 0; i < word; ++i)
+            rank += __popc(bits[i]);
+        const uint32_t mask = bit == 0 ? 0u : ((1u << bit) - 1u);
+        rank += __popc(bits[word] & mask);
+        return base + rank;
     }
 
 } // namespace o_voxel::fdg

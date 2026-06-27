@@ -34,7 +34,16 @@ namespace o_voxel::fdg
         const torch::Tensor &grid_range,
         int64_t chunk_triangles);
 
-    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+    std::tuple<
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor>
     intersect_qef(
         const torch::Tensor &triangles,
         const torch::Tensor &voxel_size,
@@ -56,7 +65,7 @@ namespace o_voxel::fdg
         int64_t chunk_triangles);
 
     std::tuple<torch::Tensor, torch::Tensor>
-    voxelize_mesh_oct_old(
+    voxelize_mesh_octree(
         const torch::Tensor &vertices,
         const torch::Tensor &faces,
         const torch::Tensor &voxel_size,
@@ -75,6 +84,26 @@ namespace o_voxel::fdg
         const torch::Tensor &voxel_size,
         const torch::Tensor &grid_range,
         const torch::Tensor &voxels);
+
+    torch::Tensor face_qef_ref(
+        const torch::Tensor &triangles,
+        const torch::Tensor &voxel_size,
+        const torch::Tensor &grid_range,
+        const torch::Tensor &voxels,
+        const torch::Tensor &brick_hash_keys,
+        const torch::Tensor &brick_hash_vals,
+        const torch::Tensor &brick_bits,
+        const torch::Tensor &brick_base);
+
+    torch::Tensor face_qef(
+        const torch::Tensor &triangles,
+        const torch::Tensor &voxel_size,
+        const torch::Tensor &grid_range,
+        const torch::Tensor &voxels,
+        const torch::Tensor &brick_hash_keys,
+        const torch::Tensor &brick_hash_vals,
+        const torch::Tensor &brick_bits,
+        const torch::Tensor &brick_base);
 
     torch::Tensor boundary_qef_old(
         const torch::Tensor &boundaries,

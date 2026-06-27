@@ -21,12 +21,6 @@ namespace o_voxel::fdg
         constexpr int kThreads = 256;
         constexpr int kTileU = 16;
         constexpr int kTileV = 16;
-        constexpr int kBrickSize = 8;
-        constexpr int kLocalCells = kBrickSize * kBrickSize * kBrickSize;
-        constexpr int kBitWords = kLocalCells / 32;
-        constexpr uint64_t kEmptyKey = UINT64_MAX;
-        constexpr uint32_t kEmptyVal = UINT32_MAX;
-        constexpr uint32_t kOverflowVal = UINT32_MAX - 1u;
 
         struct ScanTask
         {
@@ -82,9 +76,7 @@ namespace o_voxel::fdg
         __device__ bool compute_scan_bbox(
             const float *tri,
             int axis,
-            float3 voxel_size,
-            Int3 grid_min,
-            Int3 grid_max,
+            GridSpec grid,
             int &u0,
             int &u1,
             int &v0,
@@ -92,6 +84,9 @@ namespace o_voxel::fdg
         {
             const int ax0 = (axis + 1) % 3;
             const int ax1 = (axis + 2) % 3;
+            const float3 voxel_size = grid.voxel_size;
+            const Int3 grid_min = grid.grid_min;
+            const Int3 grid_max = grid.grid_max;
             const float vs[3] = {voxel_size.x, voxel_size.y, voxel_size.z};
             float min_u = tri[ax0];
             float max_u = tri[ax0];
@@ -117,14 +112,15 @@ namespace o_voxel::fdg
         __device__ int64_t task_brick_bound(
             const float *tri,
             const ScanTask &task,
-            float3 voxel_size,
-            Int3 grid_min,
-            Int3 grid_max)
+            GridSpec grid)
         {
             const int axis = task.axis;
             const int ax0 = (axis + 1) % 3;
             const int ax1 = (axis + 2) % 3;
             const int ax2 = axis;
+            const float3 voxel_size = grid.voxel_size;
+            const Int3 grid_min = grid.grid_min;
+            const Int3 grid_max = grid.grid_max;
             const float vs[3] = {voxel_size.x, voxel_size.y, voxel_size.z};
             int lo[3];
             int hi[3];
@@ -180,14 +176,15 @@ namespace o_voxel::fdg
         __device__ void scan_triangle_events_tiled(
             const float *tri,
             const ScanTask &task,
-            float3 voxel_size,
-            Int3 grid_min,
-            Int3 grid_max,
+            GridSpec grid,
             Emit emit)
         {
             const int ax2 = task.axis;
             const int ax0 = (ax2 + 1) % 3;
             const int ax1 = (ax2 + 2) % 3;
+            const float3 voxel_size = grid.voxel_size;
+            const Int3 grid_min = grid.grid_min;
+            const Int3 grid_max = grid.grid_max;
             double t[3][3] = {
                 {static_cast<double>(tri[ax0]), static_cast<double>(tri[ax1]), static_cast<double>(tri[ax2])},
                 {static_cast<double>(tri[3 + ax0]), static_cast<double>(tri[3 + ax1]), static_cast<double>(tri[3 + ax2])},
@@ -267,11 +264,12 @@ namespace o_voxel::fdg
             int x,
             int y,
             int z,
-            Int3 grid_min,
-            Int3 grid_max,
+            GridSpec grid,
             Int3 &brick,
             int &local_id)
         {
+            const Int3 grid_min = grid.grid_min;
+            const Int3 grid_max = grid.grid_max;
             const int rx = x - grid_min.x;
             const int ry = y - grid_min.y;
             const int rz = z - grid_min.z;
@@ -303,17 +301,17 @@ namespace o_voxel::fdg
             {
                 const uint64_t prev = atomicCAS(
                     reinterpret_cast<unsigned long long *>(hash_keys + slot),
-                    static_cast<unsigned long long>(kEmptyKey),
+                    static_cast<unsigned long long>(kEmptyBrickKey),
                     static_cast<unsigned long long>(key));
-                if (prev == kEmptyKey)
+                if (prev == kEmptyBrickKey)
                 {
                     const uint32_t idx = atomicAdd(brick_count, 1u);
                     if (idx >= max_bricks)
                     {
                         atomicExch(overflow_flag, 1);
                         __threadfence();
-                        hash_vals[slot] = kOverflowVal;
-                        return kEmptyVal;
+                        hash_vals[slot] = kOverflowBrickVal;
+                        return kEmptyBrickVal;
                     }
                     brick_coords[3 * idx + 0] = brick.x;
                     brick_coords[3 * idx + 1] = brick.y;
@@ -326,44 +324,14 @@ namespace o_voxel::fdg
                 {
                     volatile uint32_t *val_ptr = hash_vals + slot;
                     uint32_t val = *val_ptr;
-                    while (val == kEmptyVal)
+                    while (val == kEmptyBrickVal)
                         val = *val_ptr;
-                    return val == kOverflowVal ? kEmptyVal : val;
+                    return val == kOverflowBrickVal ? kEmptyBrickVal : val;
                 }
                 slot = (slot + 1u) & (hash_capacity - 1);
             }
             atomicExch(overflow_flag, 1);
-            return kEmptyVal;
-        }
-
-        __device__ uint32_t lookup_brick(
-            uint64_t key,
-            const uint64_t *hash_keys,
-            const uint32_t *hash_vals,
-            uint64_t hash_capacity)
-        {
-            uint64_t slot = mix64(key) & (hash_capacity - 1);
-            for (uint64_t probe = 0; probe < hash_capacity; ++probe)
-            {
-                const uint64_t found = hash_keys[slot];
-                if (found == kEmptyKey)
-                    return kEmptyVal;
-                if (found == key)
-                    return hash_vals[slot];
-                slot = (slot + 1u) & (hash_capacity - 1);
-            }
-            return kEmptyVal;
-        }
-
-        __device__ __forceinline__ int rank_inside_brick(const uint32_t *bits, int local_id)
-        {
-            const int word = local_id / 32;
-            const int bit = local_id - word * 32;
-            int rank = 0;
-            for (int i = 0; i < word; ++i)
-                rank += __popc(bits[i]);
-            const uint32_t mask = bit == 0 ? 0u : ((1u << bit) - 1u);
-            return rank + __popc(bits[word] & mask);
+            return kEmptyBrickVal;
         }
 
         __device__ __forceinline__ SymQEF10 triangle_qef(const float *tri)
@@ -401,9 +369,7 @@ namespace o_voxel::fdg
         __global__ void count_scan_tasks_kernel(
             const float *triangles,
             int64_t num_triangles,
-            float3 voxel_size,
-            Int3 grid_min,
-            Int3 grid_max,
+            GridSpec grid,
             int64_t *task_counts)
         {
             const int64_t pair_id = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -412,7 +378,7 @@ namespace o_voxel::fdg
             const int64_t tri_id = pair_id / 3;
             const int axis = static_cast<int>(pair_id - tri_id * 3);
             int u0, u1, v0, v1;
-            if (!compute_scan_bbox(triangles + tri_id * 9, axis, voxel_size, grid_min, grid_max, u0, u1, v0, v1))
+            if (!compute_scan_bbox(triangles + tri_id * 9, axis, grid, u0, u1, v0, v1))
             {
                 task_counts[pair_id] = 0;
                 return;
@@ -424,9 +390,7 @@ namespace o_voxel::fdg
         __global__ void emit_scan_tasks_and_brick_bounds_kernel(
             const float *triangles,
             int64_t num_triangles,
-            float3 voxel_size,
-            Int3 grid_min,
-            Int3 grid_max,
+            GridSpec grid,
             const int64_t *task_offsets,
             ScanTask *tasks,
             int64_t *task_brick_bounds)
@@ -437,7 +401,7 @@ namespace o_voxel::fdg
             const int64_t tri_id = pair_id / 3;
             const int axis = static_cast<int>(pair_id - tri_id * 3);
             int u0, u1, v0, v1;
-            if (!compute_scan_bbox(triangles + tri_id * 9, axis, voxel_size, grid_min, grid_max, u0, u1, v0, v1))
+            if (!compute_scan_bbox(triangles + tri_id * 9, axis, grid, u0, u1, v0, v1))
                 return;
 
             int64_t out = task_offsets[pair_id];
@@ -454,7 +418,7 @@ namespace o_voxel::fdg
                         static_cast<int32_t>(min(v + kTileV, v1)),
                     };
                     tasks[out] = task;
-                    task_brick_bounds[out] = task_brick_bound(triangles + tri_id * 9, task, voxel_size, grid_min, grid_max);
+                    task_brick_bounds[out] = task_brick_bound(triangles + tri_id * 9, task, grid);
                     ++out;
                 }
             }
@@ -464,9 +428,7 @@ namespace o_voxel::fdg
             const ScanTask *tasks,
             int64_t num_tasks,
             const float *triangles,
-            float3 voxel_size,
-            Int3 grid_min,
-            Int3 grid_max,
+            GridSpec grid,
             uint64_t *hash_keys,
             uint32_t *hash_vals,
             uint32_t *brick_count,
@@ -479,6 +441,8 @@ namespace o_voxel::fdg
             const int64_t task_id = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
             if (task_id >= num_tasks)
                 return;
+            const Int3 grid_min = grid.grid_min;
+            const Int3 grid_max = grid.grid_max;
             const ScanTask task = tasks[task_id];
             const float *tri = triangles + static_cast<int64_t>(task.tri_id) * 9;
             auto emit = [&](int ax0, int ax1, int ax2, int x_idx, int y_idx, int z_idx, double, double, double)
@@ -499,16 +463,16 @@ namespace o_voxel::fdg
                             continue;
                         Int3 brick;
                         int local_id;
-                        const uint64_t key = voxel_to_brick(coord[0], coord[1], coord[2], grid_min, grid_max, brick, local_id);
+                        const uint64_t key = voxel_to_brick(coord[0], coord[1], coord[2], grid, brick, local_id);
                         const uint32_t brick_idx = get_or_create_brick(
                             key, brick, hash_keys, hash_vals, brick_count, brick_coords, overflow_flag, hash_capacity, max_bricks);
-                        if (brick_idx == kEmptyVal)
+                        if (brick_idx == kEmptyBrickVal)
                             continue;
-                        atomicOr(brick_bits + static_cast<int64_t>(brick_idx) * kBitWords + local_id / 32, 1u << (local_id & 31));
+                        atomicOr(brick_bits + static_cast<int64_t>(brick_idx) * kBrickBitWords + local_id / 32, 1u << (local_id & 31));
                     }
                 }
             };
-            scan_triangle_events_tiled(tri, task, voxel_size, grid_min, grid_max, emit);
+            scan_triangle_events_tiled(tri, task, grid, emit);
         }
 
         __global__ void count_brick_voxels_kernel(
@@ -520,8 +484,8 @@ namespace o_voxel::fdg
             if (brick_idx >= num_bricks)
                 return;
             int64_t count = 0;
-            const uint32_t *bits = brick_bits + brick_idx * kBitWords;
-            for (int i = 0; i < kBitWords; ++i)
+            const uint32_t *bits = brick_bits + brick_idx * kBrickBitWords;
+            for (int i = 0; i < kBrickBitWords; ++i)
                 count += __popc(bits[i]);
             brick_counts[brick_idx] = count;
         }
@@ -531,18 +495,19 @@ namespace o_voxel::fdg
             const uint32_t *brick_bits,
             const int64_t *brick_base,
             int64_t num_bricks,
-            Int3 grid_min,
+            GridSpec grid,
             int32_t *voxels)
         {
             const int64_t brick_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
             if (brick_idx >= num_bricks)
                 return;
+            const Int3 grid_min = grid.grid_min;
             const int bx = brick_coords[3 * brick_idx + 0];
             const int by = brick_coords[3 * brick_idx + 1];
             const int bz = brick_coords[3 * brick_idx + 2];
-            const uint32_t *bits = brick_bits + brick_idx * kBitWords;
+            const uint32_t *bits = brick_bits + brick_idx * kBrickBitWords;
             int64_t out = brick_base[brick_idx];
-            for (int local_id = 0; local_id < kLocalCells; ++local_id)
+            for (int local_id = 0; local_id < kBrickLocalCells; ++local_id)
             {
                 if ((bits[local_id / 32] & (1u << (local_id & 31))) == 0)
                     continue;
@@ -561,9 +526,7 @@ namespace o_voxel::fdg
             const ScanTask *tasks,
             int64_t num_tasks,
             const float *triangles,
-            float3 voxel_size,
-            Int3 grid_min,
-            Int3 grid_max,
+            GridSpec grid,
             const uint64_t *hash_keys,
             const uint32_t *hash_vals,
             const uint32_t *brick_bits,
@@ -577,6 +540,9 @@ namespace o_voxel::fdg
             const int64_t task_id = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
             if (task_id >= num_tasks)
                 return;
+            const Int3 grid_min = grid.grid_min;
+            const Int3 grid_max = grid.grid_max;
+            const BrickLookup lookup{hash_keys, hash_vals, brick_bits, brick_base, hash_capacity};
             const ScanTask task = tasks[task_id];
             const float *tri = triangles + static_cast<int64_t>(task.tri_id) * 9;
             const SymQEF10 qef = triangle_qef(tri);
@@ -596,14 +562,14 @@ namespace o_voxel::fdg
                             continue;
                         if (coord[2] < grid_min.z || coord[2] >= grid_max.z)
                             continue;
-                        Int3 brick;
-                        int local_id;
-                        const uint64_t key = voxel_to_brick(coord[0], coord[1], coord[2], grid_min, grid_max, brick, local_id);
-                        const uint32_t brick_idx = lookup_brick(key, hash_keys, hash_vals, hash_capacity);
-                        if (brick_idx == kEmptyVal)
+                        const int64_t out_idx = lookup_voxel_row_in_bricks(
+                            coord[0],
+                            coord[1],
+                            coord[2],
+                            grid,
+                            lookup);
+                        if (out_idx < 0)
                             continue;
-                        const uint32_t *bits = brick_bits + static_cast<int64_t>(brick_idx) * kBitWords;
-                        const int64_t out_idx = brick_base[brick_idx] + rank_inside_brick(bits, local_id);
                         float p[3];
                         p[ax0] = static_cast<float>(x);
                         p[ax1] = static_cast<float>(y);
@@ -618,7 +584,7 @@ namespace o_voxel::fdg
                     }
                 }
             };
-            scan_triangle_events_tiled(tri, task, voxel_size, grid_min, grid_max, emit);
+            scan_triangle_events_tiled(tri, task, grid, emit);
         }
 
         __global__ void decode_intersection_masks_kernel(
@@ -724,18 +690,25 @@ namespace o_voxel::fdg
 
         IntersectionOccupancy build_intersection_occupancy(
             const torch::Tensor &triangles,
-            float3 voxel_size,
-            Int3 grid_min,
-            Int3 grid_max,
+            GridSpec grid,
             const torch::Device &device,
             cudaStream_t stream)
         {
             IntersectionOccupancy out;
+            const Int3 grid_min = grid.grid_min;
+            const Int3 grid_max = grid.grid_max;
             const int64_t num_triangles = triangles.size(0);
             const auto opts_i32 = torch::TensorOptions().dtype(torch::kInt32).device(device);
             const auto opts_i64 = torch::TensorOptions().dtype(torch::kInt64).device(device);
             const auto opts_u32 = torch::TensorOptions().dtype(torch::kUInt32).device(device);
             const auto opts_u64 = torch::TensorOptions().dtype(torch::kUInt64).device(device);
+            out.tasks = torch::empty({0, 6}, opts_i32);
+            out.hash_keys = torch::empty({0}, opts_u64);
+            out.hash_vals = torch::empty({0}, opts_u32);
+            out.brick_coords = torch::empty({0, 3}, opts_i32);
+            out.brick_bits = torch::empty({0, kBrickBitWords}, opts_u32);
+            out.brick_base = torch::empty({0}, opts_i64);
+            out.overflow_flag = torch::empty({0}, opts_i32);
             out.voxels = torch::empty({0, 3}, opts_i32);
             if (num_triangles == 0)
                 return out;
@@ -747,9 +720,7 @@ namespace o_voxel::fdg
             count_scan_tasks_kernel<<<blocks, kThreads, 0, stream>>>(
                 triangles.data_ptr<float>(),
                 num_triangles,
-                voxel_size,
-                grid_min,
-                grid_max,
+                grid,
                 task_counts.data_ptr<int64_t>());
             C10_CUDA_KERNEL_LAUNCH_CHECK();
 
@@ -764,9 +735,7 @@ namespace o_voxel::fdg
             emit_scan_tasks_and_brick_bounds_kernel<<<blocks, kThreads, 0, stream>>>(
                 triangles.data_ptr<float>(),
                 num_triangles,
-                voxel_size,
-                grid_min,
-                grid_max,
+                grid,
                 task_offsets.data_ptr<int64_t>(),
                 reinterpret_cast<ScanTask *>(out.tasks.data_ptr<int32_t>()),
                 task_brick_bounds.data_ptr<int64_t>());
@@ -788,7 +757,7 @@ namespace o_voxel::fdg
             out.hash_vals = torch::empty({hash_capacity_i64}, opts_u32);
             auto brick_count = torch::zeros({1}, opts_u32);
             out.brick_coords = torch::empty({max_bricks, 3}, opts_i32);
-            out.brick_bits = torch::zeros({max_bricks, kBitWords}, opts_u32);
+            out.brick_bits = torch::zeros({max_bricks, kBrickBitWords}, opts_u32);
             out.overflow_flag = torch::zeros({1}, opts_i32);
             C10_CUDA_CHECK(cudaMemsetAsync(out.hash_keys.data_ptr<uint64_t>(), 0xff, hash_capacity_i64 * sizeof(uint64_t), stream));
             C10_CUDA_CHECK(cudaMemsetAsync(out.hash_vals.data_ptr<uint32_t>(), 0xff, hash_capacity_i64 * sizeof(uint32_t), stream));
@@ -798,9 +767,7 @@ namespace o_voxel::fdg
                 reinterpret_cast<const ScanTask *>(out.tasks.data_ptr<int32_t>()),
                 num_tasks,
                 triangles.data_ptr<float>(),
-                voxel_size,
-                grid_min,
-                grid_max,
+                grid,
                 out.hash_keys.data_ptr<uint64_t>(),
                 out.hash_vals.data_ptr<uint32_t>(),
                 brick_count.data_ptr<uint32_t>(),
@@ -844,7 +811,7 @@ namespace o_voxel::fdg
                 out.brick_bits.data_ptr<uint32_t>(),
                 out.brick_base.data_ptr<int64_t>(),
                 num_bricks,
-                grid_min,
+                grid,
                 out.voxels.data_ptr<int32_t>());
             C10_CUDA_KERNEL_LAUNCH_CHECK();
             return out;
@@ -866,13 +833,24 @@ namespace o_voxel::fdg
         const torch::Device device = triangles.device();
         const float *voxel_size_ptr = voxel_size.data_ptr<float>();
         const int32_t *grid_range_ptr = grid_range.data_ptr<int32_t>();
-        const float3 voxel_size_h{voxel_size_ptr[0], voxel_size_ptr[1], voxel_size_ptr[2]};
-        const Int3 grid_min{grid_range_ptr[0], grid_range_ptr[1], grid_range_ptr[2]};
-        const Int3 grid_max{grid_range_ptr[3], grid_range_ptr[4], grid_range_ptr[5]};
-        return build_intersection_occupancy(triangles, voxel_size_h, grid_min, grid_max, device, stream).voxels;
+        const GridSpec grid{
+            float3{voxel_size_ptr[0], voxel_size_ptr[1], voxel_size_ptr[2]},
+            Int3{grid_range_ptr[0], grid_range_ptr[1], grid_range_ptr[2]},
+            Int3{grid_range_ptr[3], grid_range_ptr[4], grid_range_ptr[5]},
+        };
+        return build_intersection_occupancy(triangles, grid, device, stream).voxels;
     }
 
-    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+    std::tuple<
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor>
     intersect_qef(
         const torch::Tensor &triangles,
         const torch::Tensor &voxel_size,
@@ -890,18 +868,29 @@ namespace o_voxel::fdg
         const auto opts_u32 = torch::TensorOptions().dtype(torch::kUInt32).device(device);
         const float *voxel_size_ptr = voxel_size.data_ptr<float>();
         const int32_t *grid_range_ptr = grid_range.data_ptr<int32_t>();
-        const float3 voxel_size_h{voxel_size_ptr[0], voxel_size_ptr[1], voxel_size_ptr[2]};
-        const Int3 grid_min{grid_range_ptr[0], grid_range_ptr[1], grid_range_ptr[2]};
-        const Int3 grid_max{grid_range_ptr[3], grid_range_ptr[4], grid_range_ptr[5]};
+        const GridSpec grid{
+            float3{voxel_size_ptr[0], voxel_size_ptr[1], voxel_size_ptr[2]},
+            Int3{grid_range_ptr[0], grid_range_ptr[1], grid_range_ptr[2]},
+            Int3{grid_range_ptr[3], grid_range_ptr[4], grid_range_ptr[5]},
+        };
 
-        IntersectionOccupancy occ = build_intersection_occupancy(triangles, voxel_size_h, grid_min, grid_max, device, stream);
+        IntersectionOccupancy occ = build_intersection_occupancy(triangles, grid, device, stream);
         const int64_t n = occ.num_voxels;
         auto mean_sum = torch::zeros({n, 3}, opts_f32);
         auto cnt = torch::zeros({n}, opts_f32);
         auto intersected = torch::empty({n, 3}, opts_bool);
         auto qefs = torch::zeros({n, 10}, opts_f32);
         if (n == 0)
-            return std::make_tuple(occ.voxels, mean_sum, cnt, intersected, qefs);
+            return std::make_tuple(
+                occ.voxels,
+                mean_sum,
+                cnt,
+                intersected,
+                qefs,
+                occ.hash_keys,
+                occ.hash_vals,
+                occ.brick_bits,
+                occ.brick_base);
 
         auto intersected_mask = torch::zeros({n}, opts_u32);
         const int blocks_tasks = static_cast<int>((occ.num_tasks + kThreads - 1) / kThreads);
@@ -909,9 +898,7 @@ namespace o_voxel::fdg
             reinterpret_cast<const ScanTask *>(occ.tasks.data_ptr<int32_t>()),
             occ.num_tasks,
             triangles.data_ptr<float>(),
-            voxel_size_h,
-            grid_min,
-            grid_max,
+            grid,
             occ.hash_keys.data_ptr<uint64_t>(),
             occ.hash_vals.data_ptr<uint32_t>(),
             occ.brick_bits.data_ptr<uint32_t>(),
@@ -929,7 +916,16 @@ namespace o_voxel::fdg
             n,
             intersected.data_ptr<bool>());
         C10_CUDA_KERNEL_LAUNCH_CHECK();
-        return std::make_tuple(occ.voxels, mean_sum, cnt, intersected, qefs);
+        return std::make_tuple(
+            occ.voxels,
+            mean_sum,
+            cnt,
+            intersected,
+            qefs,
+            occ.hash_keys,
+            occ.hash_vals,
+            occ.brick_bits,
+            occ.brick_base);
     }
 
 } // namespace o_voxel::fdg
