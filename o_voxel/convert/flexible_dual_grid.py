@@ -5,13 +5,6 @@ from .. import _C
 
 __all__ = [
     "mesh_to_flexible_dual_grid",
-    "intersection_occ",
-    "intersect_qef",
-    "voxelize_mesh_gpu",
-    "voxelize_edge_gpu",
-    "face_qef",
-    "voxel_traverse_edge_dda_gpu",
-    "boundary_qef",
     "flexible_dual_grid_to_mesh",
 ]
 
@@ -32,251 +25,6 @@ def _init_hashmap(grid_size, capacity, device):
     return hashmap_keys, hashmap_vals
 
 
-def _as_float3_tensor(
-    value: Union[float, list, tuple, np.ndarray, torch.Tensor],
-    name: str,
-    device: torch.device,
-):
-    if isinstance(value, float):
-        value = [value, value, value]
-    if isinstance(value, (list, tuple)):
-        value = np.array(value)
-    if isinstance(value, np.ndarray):
-        value = torch.tensor(value, dtype=torch.float32)
-    assert isinstance(value, torch.Tensor), f"{name} must be a float, list, tuple, np.ndarray, or torch.Tensor, but got {type(value)}"
-    assert value.dim() == 1, f"{name} must be a 1D tensor, but got {value.shape}"
-    assert value.size(0) == 3, f"{name} must have 3 elements, but got {value.size(0)}"
-    return value.to(device=device, dtype=torch.float32).contiguous()
-
-
-def _as_grid_range_tensor(
-    value: Union[list, tuple, np.ndarray, torch.Tensor],
-    device: torch.device,
-):
-    if isinstance(value, (list, tuple)):
-        value = np.array(value)
-    if isinstance(value, np.ndarray):
-        value = torch.tensor(value, dtype=torch.int32)
-    assert isinstance(value, torch.Tensor), f"grid_range must be a list, tuple, np.ndarray, or torch.Tensor, but got {type(value)}"
-    assert value.dim() == 2, f"grid_range must be a 2D tensor, but got {value.shape}"
-    assert value.size(0) == 2, f"grid_range must have 2 rows, but got {value.size(0)}"
-    assert value.size(1) == 3, f"grid_range must have 3 columns, but got {value.size(1)}"
-    return value.to(device=device, dtype=torch.int32).contiguous()
-
-
-def _sym10_to_mat4(q: torch.Tensor):
-    assert q.dim() == 2 and q.size(1) == 10, f"q must have shape [N, 10], got {tuple(q.shape)}"
-    out = torch.zeros((q.size(0), 4, 4), dtype=torch.float32, device=q.device)
-    out[:, 0, 0] = q[:, 0]
-    out[:, 0, 1] = out[:, 1, 0] = q[:, 1]
-    out[:, 0, 2] = out[:, 2, 0] = q[:, 2]
-    out[:, 0, 3] = out[:, 3, 0] = q[:, 3]
-    out[:, 1, 1] = q[:, 4]
-    out[:, 1, 2] = out[:, 2, 1] = q[:, 5]
-    out[:, 1, 3] = out[:, 3, 1] = q[:, 6]
-    out[:, 2, 2] = q[:, 7]
-    out[:, 2, 3] = out[:, 3, 2] = q[:, 8]
-    out[:, 3, 3] = q[:, 9]
-    return out
-
-
-@torch.no_grad()
-def intersection_occ(
-    triangles: torch.Tensor,
-    voxel_size: Union[float, list, tuple, np.ndarray, torch.Tensor],
-    grid_range: Union[list, tuple, np.ndarray, torch.Tensor],
-    chunk_triangles: int = 262144,
-):
-    if triangles.dim() != 3 or triangles.size(1) != 3 or triangles.size(2) != 3:
-        raise ValueError(f"triangles must have shape [T, 3, 3], got {tuple(triangles.shape)}")
-
-    device = triangles.device
-    triangles = triangles.to(device=device, dtype=torch.float32).contiguous()
-    voxel_size = _as_float3_tensor(voxel_size, "voxel_size", device)
-    grid_range = _as_grid_range_tensor(grid_range, device)
-
-    if triangles.is_cuda:
-        return _C.intersection_occ_gpu(
-            triangles,
-            voxel_size,
-            grid_range,
-            int(chunk_triangles),
-        )
-    return _C.intersect_qef_cpu(
-        triangles,
-        voxel_size.cpu(),
-        grid_range.cpu(),
-    )[0]
-
-
-@torch.no_grad()
-def intersect_qef(
-    triangles: torch.Tensor,
-    voxel_size: Union[float, list, tuple, np.ndarray, torch.Tensor],
-    grid_range: Union[list, tuple, np.ndarray, torch.Tensor],
-    chunk_triangles: int = 262144,
-):
-    if triangles.dim() != 3 or triangles.size(1) != 3 or triangles.size(2) != 3:
-        raise ValueError(f"triangles must have shape [T, 3, 3], got {tuple(triangles.shape)}")
-
-    device = triangles.device
-    triangles = triangles.to(device=device, dtype=torch.float32).contiguous()
-    voxel_size = _as_float3_tensor(voxel_size, "voxel_size", device)
-    grid_range = _as_grid_range_tensor(grid_range, device)
-
-    if triangles.is_cuda:
-        voxels, mean_sum, cnt, intersected, qef_sym10 = _C.intersect_qef_gpu(
-            triangles,
-            voxel_size,
-            grid_range,
-            int(chunk_triangles),
-        )
-        return voxels, mean_sum, cnt, intersected, _sym10_to_mat4(qef_sym10)
-    return _C.intersect_qef_cpu(
-        triangles,
-        voxel_size.cpu(),
-        grid_range.cpu(),
-    )
-
-
-@torch.no_grad()
-def voxelize_mesh_gpu(
-    vertices: torch.Tensor,
-    faces: torch.Tensor,
-    voxel_size: Union[float, list, tuple, np.ndarray, torch.Tensor],
-    grid_range: Union[list, tuple, np.ndarray, torch.Tensor],
-):
-    if vertices.dim() != 2 or vertices.size(1) != 3:
-        raise ValueError(f"vertices must have shape [V, 3], got {tuple(vertices.shape)}")
-    if faces.dim() != 2 or faces.size(1) != 3:
-        raise ValueError(f"faces must have shape [F, 3], got {tuple(faces.shape)}")
-    if vertices.device != faces.device:
-        raise ValueError("vertices and faces must be on the same device")
-    if not vertices.is_cuda:
-        raise ValueError("vertices and faces must be CUDA tensors")
-
-    device = vertices.device
-    vertices = vertices.to(device=device, dtype=torch.float32).contiguous()
-    faces = faces.to(device=device, dtype=torch.int32).contiguous()
-    voxel_size = _as_float3_tensor(voxel_size, "voxel_size", device)
-    grid_range = _as_grid_range_tensor(grid_range, device)
-    return _C.voxelize_mesh_oct_gpu(vertices, faces, voxel_size, grid_range)
-
-
-@torch.no_grad()
-def voxelize_edge_gpu(
-    vertices: torch.Tensor,
-    edges: torch.Tensor,
-    voxel_size: Union[float, list, tuple, np.ndarray, torch.Tensor],
-    grid_range: Union[list, tuple, np.ndarray, torch.Tensor],
-):
-    if vertices.dim() != 2 or vertices.size(1) != 3:
-        raise ValueError(f"vertices must have shape [V, 3], got {tuple(vertices.shape)}")
-    if edges.dim() != 2 or edges.size(1) != 2:
-        raise ValueError(f"edges must have shape [E, 2], got {tuple(edges.shape)}")
-    if vertices.device != edges.device:
-        raise ValueError("vertices and edges must be on the same device")
-    if not vertices.is_cuda:
-        raise ValueError("vertices and edges must be CUDA tensors")
-
-    device = vertices.device
-    vertices = vertices.to(device=device, dtype=torch.float32).contiguous()
-    edges = edges.to(device=device, dtype=torch.int32).contiguous()
-    voxel_size = _as_float3_tensor(voxel_size, "voxel_size", device)
-    grid_range = _as_grid_range_tensor(grid_range, device)
-    return _C.voxelize_edge_oct_gpu(vertices, edges, voxel_size, grid_range)
-
-
-@torch.no_grad()
-def face_qef(
-    triangles: torch.Tensor,
-    voxel_size: Union[float, list, tuple, np.ndarray, torch.Tensor],
-    grid_range: Union[list, tuple, np.ndarray, torch.Tensor],
-    voxels: torch.Tensor,
-):
-    if triangles.dim() != 3 or triangles.size(1) != 3 or triangles.size(2) != 3:
-        raise ValueError(f"triangles must have shape [T, 3, 3], got {tuple(triangles.shape)}")
-    if voxels.dim() != 2 or voxels.size(1) != 3:
-        raise ValueError(f"voxels must have shape [N, 3], got {tuple(voxels.shape)}")
-    if triangles.device != voxels.device:
-        raise ValueError("triangles and voxels must be on the same device")
-
-    device = triangles.device
-    triangles = triangles.to(device=device, dtype=torch.float32).contiguous()
-    voxels = voxels.to(device=device, dtype=torch.int32).contiguous()
-    voxel_size = _as_float3_tensor(voxel_size, "voxel_size", device)
-    grid_range = _as_grid_range_tensor(grid_range, device)
-
-    if triangles.is_cuda:
-        return _sym10_to_mat4(_C.face_qef_gpu(triangles, voxel_size, grid_range, voxels))
-    return _C.face_qef_cpu(
-        triangles,
-        voxel_size.cpu(),
-        grid_range.cpu(),
-        voxels.cpu(),
-    )
-
-
-@torch.no_grad()
-def voxel_traverse_edge_dda_gpu(
-    vertices: torch.Tensor,
-    edges: torch.Tensor,
-    voxel_size: Union[float, list, tuple, np.ndarray, torch.Tensor],
-    grid_range: Union[list, tuple, np.ndarray, torch.Tensor],
-    chunk_steps: int = 1024,
-):
-    if vertices.dim() != 2 or vertices.size(1) != 3:
-        raise ValueError(f"vertices must have shape [V, 3], got {tuple(vertices.shape)}")
-    if edges.dim() != 2 or edges.size(1) != 2:
-        raise ValueError(f"edges must have shape [E, 2], got {tuple(edges.shape)}")
-    if vertices.device != edges.device:
-        raise ValueError("vertices and edges must be on the same device")
-    if not vertices.is_cuda:
-        raise ValueError("vertices and edges must be CUDA tensors")
-
-    device = vertices.device
-    vertices = vertices.to(device=device, dtype=torch.float32).contiguous()
-    edges = edges.to(device=device, dtype=torch.int32).contiguous()
-    voxel_size = _as_float3_tensor(voxel_size, "voxel_size", device)
-    grid_range = _as_grid_range_tensor(grid_range, device)
-    return _C.voxel_traverse_edge_dda_gpu(vertices, edges, voxel_size, grid_range, int(chunk_steps))
-
-
-@torch.no_grad()
-def boundary_qef(
-    boundaries: torch.Tensor,
-    voxel_size: Union[float, list, tuple, np.ndarray, torch.Tensor],
-    grid_range: Union[list, tuple, np.ndarray, torch.Tensor],
-    boundary_weight: float,
-    voxels: torch.Tensor,
-    chunk_steps: int = 1024,
-):
-    if boundaries.dim() != 3 or boundaries.size(1) != 2 or boundaries.size(2) != 3:
-        raise ValueError(f"boundaries must have shape [B, 2, 3], got {tuple(boundaries.shape)}")
-    if voxels.dim() != 2 or voxels.size(1) != 3:
-        raise ValueError(f"voxels must have shape [N, 3], got {tuple(voxels.shape)}")
-    if boundaries.device != voxels.device:
-        raise ValueError("boundaries and voxels must be on the same device")
-
-    device = boundaries.device
-    boundaries = boundaries.to(device=device, dtype=torch.float32).contiguous()
-    voxels = voxels.to(device=device, dtype=torch.int32).contiguous()
-    voxel_size = _as_float3_tensor(voxel_size, "voxel_size", device)
-    grid_range = _as_grid_range_tensor(grid_range, device)
-
-    if boundaries.is_cuda:
-        return _sym10_to_mat4(
-            _C.boundary_qef_gpu(boundaries, voxel_size, grid_range, float(boundary_weight), voxels, int(chunk_steps))
-        )
-    return _C.boundary_qef_cpu(
-        boundaries,
-        voxel_size.cpu(),
-        grid_range.cpu(),
-        float(boundary_weight),
-        voxels.cpu(),
-    )
-
-
 @torch.no_grad()
 def mesh_to_flexible_dual_grid(
     vertices: torch.Tensor,
@@ -287,8 +35,6 @@ def mesh_to_flexible_dual_grid(
     face_weight: float = 1.0,
     boundary_weight: float = 1.0,
     regularization_weight: float = 0.1,
-    intersect_chunk_triangles: int = 262144,
-    boundary_chunk_steps: int = 1024,
     timing: bool = False,
 ) -> Union[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
@@ -305,9 +51,7 @@ def mesh_to_flexible_dual_grid(
         face_weight (float): The weight of the face term in the QEF when solving the dual vertices.
         boundary_weight (float): The weight of the boundary term in the QEF when solving the dual vertices.
         regularization_weight (float): The weight of the regularization term in the QEF when solving the dual vertices.
-        intersect_chunk_triangles (int): Triangle chunk size used by CUDA path.
-        boundary_chunk_steps (int): Edge-step chunk size used by CUDA path.
-        timing (bool): Whether to time the voxelization process (CPU path).
+        timing (bool): Whether to time the voxelization process.
         
     Returns:
         torch.Tensor: The indices of the voxels that are occupied by the mesh.
@@ -316,19 +60,9 @@ def mesh_to_flexible_dual_grid(
         torch.Tensor: The intersected flag of each voxel.
     """
     
-    if vertices.dim() != 2 or vertices.size(1) != 3:
-        raise ValueError(f"vertices must have shape [V, 3], got {tuple(vertices.shape)}")
-    if faces.dim() != 2 or faces.size(1) != 3:
-        raise ValueError(f"faces must have shape [F, 3], got {tuple(faces.shape)}")
-
-    use_cuda = vertices.is_cuda or faces.is_cuda
-    if vertices.device != faces.device:
-        raise ValueError("vertices and faces must be on the same device")
-    device = vertices.device if use_cuda else torch.device("cpu")
-
     # Load mesh
-    vertices = vertices.to(device=device, dtype=torch.float32).contiguous()
-    faces = faces.to(device=device, dtype=torch.int32).contiguous()
+    vertices = vertices.float()
+    faces = faces.int()
 
     # Voxelize settings
     assert voxel_size is not None or grid_size is not None, "Either voxel_size or grid_size must be provided"
@@ -343,7 +77,6 @@ def mesh_to_flexible_dual_grid(
         assert isinstance(voxel_size, torch.Tensor), f"voxel_size must be a float, list, tuple, np.ndarray, or torch.Tensor, but got {type(voxel_size)}"
         assert voxel_size.dim() == 1, f"voxel_size must be a 1D tensor, but got {voxel_size.shape}"
         assert voxel_size.size(0) == 3, f"voxel_size must have 3 elements, but got {voxel_size.size(0)}"
-        voxel_size = voxel_size.to(device=device, dtype=torch.float32).contiguous()
 
     if grid_size is not None:
         if isinstance(grid_size, int):
@@ -355,7 +88,6 @@ def mesh_to_flexible_dual_grid(
         assert isinstance(grid_size, torch.Tensor), f"grid_size must be an int, list, tuple, np.ndarray, or torch.Tensor, but got {type(grid_size)}"
         assert grid_size.dim() == 1, f"grid_size must be a 1D tensor, but got {grid_size.shape}"
         assert grid_size.size(0) == 3, f"grid_size must have 3 elements, but got {grid_size.size(0)}"
-        grid_size = grid_size.to(device=device, dtype=torch.int32).contiguous()
 
     if aabb is not None:
         if isinstance(aabb, (list, tuple)):
@@ -366,7 +98,6 @@ def mesh_to_flexible_dual_grid(
         assert aabb.dim() == 2, f"aabb must be a 2D tensor, but got {aabb.shape}"
         assert aabb.size(0) == 2, f"aabb must have 2 rows, but got {aabb.size(0)}"
         assert aabb.size(1) == 3, f"aabb must have 3 columns, but got {aabb.size(1)}"
-        aabb = aabb.to(device=device, dtype=torch.float32).contiguous()
 
     # Auto adjust aabb
     if aabb is None:
@@ -382,45 +113,28 @@ def mesh_to_flexible_dual_grid(
             min_xyz -= padding * 0.5
             max_xyz += padding * 0.5
 
-        aabb = torch.stack([min_xyz, max_xyz], dim=0).to(device=device, dtype=torch.float32).contiguous()
+        aabb = torch.stack([min_xyz, max_xyz], dim=0).float().cuda()
 
     # Fill voxel size or grid size
     if voxel_size is None:
-        voxel_size = ((aabb[1] - aabb[0]) / grid_size.to(dtype=torch.float32)).to(dtype=torch.float32)
+        voxel_size = (aabb[1] - aabb[0]) / grid_size
     if grid_size is None:
         grid_size = ((aabb[1] - aabb[0]) / voxel_size).round().int()
-    voxel_size = voxel_size.to(device=device, dtype=torch.float32).contiguous()
-    grid_size = grid_size.to(device=device, dtype=torch.int32).contiguous()
         
     # subdivide mesh
-    vertices = (vertices - aabb[0].reshape(1, 3)).contiguous()
-    grid_range = torch.stack([torch.zeros_like(grid_size), grid_size], dim=0).to(dtype=torch.int32).contiguous()
-
-    if use_cuda:
-        if not hasattr(_C, "mesh_to_flexible_dual_grid_gpu"):
-            raise RuntimeError("o_voxel._C.mesh_to_flexible_dual_grid_gpu is not available in the current build")
-        ret = _C.mesh_to_flexible_dual_grid_gpu(
-            vertices,
-            faces,
-            voxel_size,
-            grid_range,
-            face_weight,
-            boundary_weight,
-            regularization_weight,
-            int(intersect_chunk_triangles),
-            int(boundary_chunk_steps),
-        )
-    else:
-        ret = _C.mesh_to_flexible_dual_grid_cpu(
-            vertices,
-            faces,
-            voxel_size,
-            grid_range,
-            face_weight,
-            boundary_weight,
-            regularization_weight,
-            timing,
-        )
+    vertices = vertices - aabb[0].reshape(1, 3)
+    grid_range = torch.stack([torch.zeros_like(grid_size), grid_size], dim=0).int()
+    
+    ret = _C.mesh_to_flexible_dual_grid_cpu(
+        vertices,
+        faces,
+        voxel_size,
+        grid_range,
+        face_weight,
+        boundary_weight,
+        regularization_weight,
+        timing,
+    )
     
     return ret
 

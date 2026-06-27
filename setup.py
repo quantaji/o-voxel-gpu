@@ -38,11 +38,6 @@ setup(
                 # Convert functions
                 "src/convert/flexible_dual_grid.cpp",
                 "src/convert/volumetic_attr.cpp",
-                "src/convert/mesh_to_flexible_dual_grid_gpu/torch_bindings.cu",
-                "src/convert/mesh_to_flexible_dual_grid_gpu/flexible_dual_grid_gpu.cu",
-                "src/convert/mesh_to_flexible_dual_grid_gpu/intersection_qef.cu",
-                "src/convert/mesh_to_flexible_dual_grid_gpu/voxelize_mesh_oct.cu",
-                "src/convert/mesh_to_flexible_dual_grid_gpu/voxel_traverse_edge_dda.cu",
                 ## Serialization functions
                 "src/serialize/api.cu",
                 "src/serialize/hilbert.cu",

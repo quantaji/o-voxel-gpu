@@ -519,11 +519,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> mesh_to_flexible_dual_gr
     // Face QEF computation
     if (face_weight > 0.0f) {
         start = clock();
-        std::vector<Eigen::Matrix4f> face_qefs(voxels.size(), Eigen::Matrix4f::Zero());
-        face_qef(e_voxel_size, e_grid_min, e_grid_max, triangles, hash_table, face_qefs);
-        for (size_t i = 0; i < qefs.size(); ++i) {
-            qefs[i] += face_weight * face_qefs[i];
-        }
+        face_qef(e_voxel_size, e_grid_min, e_grid_max, triangles, hash_table, qefs);
         end = clock();
         if (timing) std::cout << "Face QEF computation took " << double(end - start) / CLOCKS_PER_SEC << " seconds." << std::endl;
     }
@@ -776,3 +772,4 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> mesh_to_flexible_dual_gr
         torch::from_blob(intersected.data(), {int(intersected.size()), 3}, torch::kBool).clone()
     );
 }
+

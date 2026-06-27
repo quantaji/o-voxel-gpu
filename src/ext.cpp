@@ -15,17 +15,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("hashmap_insert_3d_idx_as_val_cuda", &hashmap_insert_3d_idx_as_val_cuda);
     // Convert functions
     m.def("mesh_to_flexible_dual_grid_cpu", &mesh_to_flexible_dual_grid_cpu, py::call_guard<py::gil_scoped_release>());
-    m.def("mesh_to_flexible_dual_grid_gpu", &mesh_to_flexible_dual_grid_gpu, py::call_guard<py::gil_scoped_release>());
-    m.def("intersect_qef_cpu", &intersect_qef_cpu, py::call_guard<py::gil_scoped_release>());
-    m.def("intersection_occ_gpu", &intersection_occ_gpu, py::call_guard<py::gil_scoped_release>());
-    m.def("intersect_qef_gpu", &intersect_qef_gpu, py::call_guard<py::gil_scoped_release>());
-    m.def("voxelize_mesh_oct_gpu", &voxelize_mesh_oct_gpu, py::call_guard<py::gil_scoped_release>());
-    m.def("voxelize_edge_oct_gpu", &voxelize_edge_oct_gpu, py::call_guard<py::gil_scoped_release>());
-    m.def("face_qef_cpu", &face_qef_cpu, py::call_guard<py::gil_scoped_release>());
-    m.def("face_qef_gpu", &face_qef_gpu, py::call_guard<py::gil_scoped_release>());
-    m.def("voxel_traverse_edge_dda_gpu", &voxel_traverse_edge_dda_gpu, py::call_guard<py::gil_scoped_release>());
-    m.def("boundary_qef_cpu", &boundary_qef_cpu, py::call_guard<py::gil_scoped_release>());
-    m.def("boundary_qef_gpu", &boundary_qef_gpu, py::call_guard<py::gil_scoped_release>());
     m.def("textured_mesh_to_volumetric_attr_cpu", &textured_mesh_to_volumetric_attr_cpu, py::call_guard<py::gil_scoped_release>());
     // Serialization functions
     m.def("z_order_encode_cpu", &z_order_encode_cpu, py::call_guard<py::gil_scoped_release>());
