@@ -25,6 +25,29 @@ namespace o_voxel::fdg
             int32_t bz;
         };
 
+        // Matches CPU e0.cross(e1).normalized(); explicit RN ops prevent FMA residuals.
+        __device__ __forceinline__ float3 aligned_cross_normalize3(
+            float e0x,
+            float e0y,
+            float e0z,
+            float e1x,
+            float e1y,
+            float e1z)
+        {
+            const float nx = __fsub_rn(__fmul_rn(e0y, e1z), __fmul_rn(e0z, e1y));
+            const float ny = __fsub_rn(__fmul_rn(e0z, e1x), __fmul_rn(e0x, e1z));
+            const float nz = __fsub_rn(__fmul_rn(e0x, e1y), __fmul_rn(e0y, e1x));
+            const float n2 = __fadd_rn(
+                __fadd_rn(__fmul_rn(nx, nx), __fmul_rn(ny, ny)),
+                __fmul_rn(nz, nz));
+            if (n2 > 0.0f)
+            {
+                const float len = sqrtf(n2);
+                return make_float3(nx / len, ny / len, nz / len);
+            }
+            return make_float3(nx, ny, nz);
+        }
+
         __global__ void count_face_brick_tasks_kernel(
             const float *__restrict__ triangles,
             int64_t num_triangles,
@@ -165,13 +188,10 @@ namespace o_voxel::fdg
             const float e2y = v0.y - v2.y;
             const float e2z = v0.z - v2.z;
 
-            float nx = e0y * e1z - e0z * e1y;
-            float ny = e0z * e1x - e0x * e1z;
-            float nz = e0x * e1y - e0y * e1x;
-            const float inv_len = rsqrtf(nx * nx + ny * ny + nz * nz + 1e-30f);
-            nx *= inv_len;
-            ny *= inv_len;
-            nz *= inv_len;
+            const float3 n = aligned_cross_normalize3(e0x, e0y, e0z, e1x, e1y, e1z);
+            const float nx = n.x;
+            const float ny = n.y;
+            const float nz = n.z;
             const SymQEF10 qef = qef_from_plane(make_float4(nx, ny, nz, -(nx * v0.x + ny * v0.y + nz * v0.z)));
 
             float min_x = v0.x < v1.x ? v0.x : v1.x;

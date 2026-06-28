@@ -62,21 +62,21 @@ namespace o_voxel::fdg
             return a.x * b.x + a.y * b.y + a.z * b.z;
         }
 
-        __device__ __forceinline__ float3 cross3(float3 a, float3 b)
+        // Matches CPU e0.cross(e1).normalized(); explicit RN ops prevent FMA residuals.
+        __device__ __forceinline__ float3 aligned_cross_normalize3(float3 a, float3 b)
         {
-            return make_float3(
-                a.y * b.z - a.z * b.y,
-                a.z * b.x - a.x * b.z,
-                a.x * b.y - a.y * b.x);
-        }
-
-        __device__ __forceinline__ float3 normalize3(float3 a)
-        {
-            const float n2 = dot3(a, a);
-            if (n2 <= 0.0f)
-                return a;
-            const float n = sqrtf(n2);
-            return make_float3(a.x / n, a.y / n, a.z / n);
+            const float nx = __fsub_rn(__fmul_rn(a.y, b.z), __fmul_rn(a.z, b.y));
+            const float ny = __fsub_rn(__fmul_rn(a.z, b.x), __fmul_rn(a.x, b.z));
+            const float nz = __fsub_rn(__fmul_rn(a.x, b.y), __fmul_rn(a.y, b.x));
+            const float n2 = __fadd_rn(
+                __fadd_rn(__fmul_rn(nx, nx), __fmul_rn(ny, ny)),
+                __fmul_rn(nz, nz));
+            if (n2 > 0.0f)
+            {
+                const float len = sqrtf(n2);
+                return make_float3(nx / len, ny / len, nz / len);
+            }
+            return make_float3(nx, ny, nz);
         }
 
         struct QEFAdd
@@ -223,7 +223,7 @@ namespace o_voxel::fdg
             const float3 v2 = make_float3(tri[6], tri[7], tri[8]);
             const float3 e0 = sub3(v1, v0);
             const float3 e1 = sub3(v2, v1);
-            const float3 n = normalize3(cross3(e0, e1));
+            const float3 n = aligned_cross_normalize3(e0, e1);
             const float4 plane = make_float4(n.x, n.y, n.z, -dot3(n, v0));
             voxel_ids[i] = voxel_id;
             qefs[i] = qef_from_plane(plane);
