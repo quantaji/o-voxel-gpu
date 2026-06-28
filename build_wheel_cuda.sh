@@ -83,6 +83,7 @@ python_cp_tag() {
         3.11) echo "cp311" ;;
         3.12) echo "cp312" ;;
         3.13) echo "cp313" ;;
+        3.14) echo "cp314" ;;
         *)
             echo "Unsupported Python version: $1" >&2
             echo "Add a Python tag mapping in python_cp_tag()." >&2
