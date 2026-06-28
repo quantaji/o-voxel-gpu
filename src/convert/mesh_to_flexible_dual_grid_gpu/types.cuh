@@ -19,11 +19,17 @@ namespace o_voxel::fdg
 
     struct GridSpec
     {
+        // Grid-local coordinates use voxel indices in [grid_min, grid_max).
         float3 voxel_size;
         Int3 grid_min;
         Int3 grid_max;
     };
 
+    // Upper-triangle storage for a symmetric 4x4 QEF matrix:
+    // q00 q01 q02 q03
+    //     q11 q12 q13
+    //         q22 q23
+    //             q33
     struct SymQEF10
     {
         float q00;
@@ -38,6 +44,9 @@ namespace o_voxel::fdg
         float q33;
     };
 
+    // Active voxels are grouped into 8x8x8 bricks. Each brick stores 512
+    // occupancy bits as 16 uint32 words, and active bricks are addressed by an
+    // open-addressing hash table.
     inline constexpr int kBrickSize = 8;
     inline constexpr int kBrickLocalCells = kBrickSize * kBrickSize * kBrickSize;
     inline constexpr int kBrickBitWords = kBrickLocalCells / 32;
@@ -45,6 +54,9 @@ namespace o_voxel::fdg
     inline constexpr uint32_t kEmptyBrickVal = UINT32_MAX;
     inline constexpr uint32_t kOverflowBrickVal = UINT32_MAX - 1u;
 
+    // Lookup data returned by intersect_qef_cuda. hash_keys/hash_vals map a
+    // brick key to a compact brick index, brick_bits stores local occupancy, and
+    // brick_base gives the first row for that brick in compacted voxel/QEF arrays.
     struct BrickLookup
     {
         const uint64_t *hash_keys;
@@ -61,6 +73,7 @@ namespace o_voxel::fdg
         Int3 grid_min,
         Int3 grid_max)
     {
+        // Dense row-major key for a voxel coordinate inside the current grid.
         const uint64_t sx = static_cast<uint64_t>(grid_max.x - grid_min.x);
         const uint64_t sy = static_cast<uint64_t>(grid_max.y - grid_min.y);
         const uint64_t ux = static_cast<uint64_t>(x - grid_min.x);
@@ -74,6 +87,7 @@ namespace o_voxel::fdg
         Int3 grid_min,
         Int3 grid_max)
     {
+        // Inverse of pack_voxel_key, used when compact voxel rows are emitted.
         const uint64_t sx = static_cast<uint64_t>(grid_max.x - grid_min.x);
         const uint64_t sy = static_cast<uint64_t>(grid_max.y - grid_min.y);
         const uint64_t yz = sx * sy;
@@ -97,6 +111,8 @@ namespace o_voxel::fdg
         const uint32_t **bits,
         int64_t *base)
     {
+        // Find one active brick and return both its occupancy bitset and its
+        // first compact voxel row. Callers can then test local bits cheaply.
         if (lookup.hash_capacity == 0)
             return false;
 
@@ -141,6 +157,7 @@ namespace o_voxel::fdg
         GridSpec grid,
         BrickLookup lookup)
     {
+        // Returns the row in compacted voxels/qefs, or -1 when the voxel is not active.
         if (lookup.hash_capacity == 0)
             return -1;
         if (x < grid.grid_min.x || x >= grid.grid_max.x)
@@ -170,6 +187,9 @@ namespace o_voxel::fdg
         if ((bits[word] & (1u << bit)) == 0)
             return -1;
 
+        // Rank is the number of active local voxels before local_id. Since
+        // emit_occupied_voxels_kernel writes voxels in the same bit order, this
+        // reproduces the compact row without a per-voxel hash table.
         int rank = 0;
         for (int i = 0; i < word; ++i)
             rank += __popc(bits[i]);

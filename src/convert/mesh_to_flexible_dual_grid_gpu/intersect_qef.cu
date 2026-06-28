@@ -1,4 +1,4 @@
-#include "api.h"
+#include "../api.h"
 
 #include "qef.cuh"
 
@@ -13,6 +13,11 @@
 #include <limits>
 #include <tuple>
 
+// Triangle/voxel intersection is expressed as a stream of small scan tasks.
+// A large triangle can cover many grid cells, so each axis projection is split
+// into 16x16 tiles; GPU threads then process tiles rather than whole triangles.
+// The occupancy pass first marks active voxels in brick bitsets and only later
+// compacts those bits into the final voxel rows used by QEF arrays.
 namespace o_voxel::fdg
 {
     namespace
@@ -22,6 +27,8 @@ namespace o_voxel::fdg
         constexpr int kTileU = 16;
         constexpr int kTileV = 16;
 
+        // One triangle-axis tile. u/v are the two scan axes for the chosen axis,
+        // and the half-open range [u0, u1) x [v0, v1) bounds the work item.
         struct ScanTask
         {
             int32_t tri_id;
@@ -32,6 +39,9 @@ namespace o_voxel::fdg
             int32_t v1;
         };
 
+        // Tensor-owned result of the shared occupancy build. intersect_occ_cuda
+        // returns only voxels; intersect_qef_cuda also reuses tasks and brick
+        // lookup tensors to accumulate intersection QEFs.
         struct IntersectionOccupancy
         {
             torch::Tensor tasks;
@@ -82,6 +92,9 @@ namespace o_voxel::fdg
             int &v0,
             int &v1)
         {
+            // For one depth axis, scan the triangle in the other two axes. The
+            // returned u/v box is conservative because each scan event later
+            // touches a 2x2 voxel neighborhood in the projection plane.
             const int ax0 = (axis + 1) % 3;
             const int ax1 = (axis + 2) % 3;
             const float3 voxel_size = grid.voxel_size;
@@ -102,6 +115,9 @@ namespace o_voxel::fdg
                 max_v = fmaxf(max_v, v);
             }
 
+            // u is expanded by one cell on the low side and two on the high
+            // side to preserve scanline event coverage near triangle edges and
+            // voxel boundaries.
             u0 = clamp_int(static_cast<int>(min_u / vs[ax0]) - 1, grid_min[ax0], grid_max[ax0] - 1);
             u1 = clamp_int(static_cast<int>(max_u / vs[ax0]) + 2, grid_min[ax0], grid_max[ax0] - 1);
             v0 = clamp_int(static_cast<int>(min_v / vs[ax1]), grid_min[ax1], grid_max[ax1] - 1);
@@ -114,6 +130,9 @@ namespace o_voxel::fdg
             const ScanTask &task,
             GridSpec grid)
         {
+            // This is an allocation bound, not the exact output count. For the
+            // tile's u/v range, estimate the depth interval covered by the
+            // triangle plane, then count all bricks overlapped by that 3D box.
             const int axis = task.axis;
             const int ax0 = (axis + 1) % 3;
             const int ax1 = (axis + 2) % 3;
@@ -143,6 +162,9 @@ namespace o_voxel::fdg
             double z_max = fmax(fmax(z0, z1), z2);
             if (fabs(denom) > 1e-20)
             {
+                // z = a*u + b*v + c is the triangle plane written over the
+                // current projection. Evaluating the four tile corners gives a
+                // conservative depth interval for all scan events in this tile.
                 const double a = ((z1 - z0) * (v2 - v0) - (z2 - z0) * (v1 - v0)) / denom;
                 const double b = ((u1 - u0) * (z2 - z0) - (u2 - u0) * (z1 - z0)) / denom;
                 const double c = z0 - a * u0 - b * v0;
@@ -163,6 +185,9 @@ namespace o_voxel::fdg
             if (hi[0] <= lo[0] || hi[1] <= lo[1] || hi[2] <= lo[2])
                 return 0;
 
+            // Convert the conservative voxel box into a conservative brick box.
+            // Summing these bounds lets the host allocate hash/bitset storage
+            // once, with overflow treated as a bug guard.
             const int64_t bx0 = (lo[0] - grid_min.x) / kBrickSize;
             const int64_t by0 = (lo[1] - grid_min.y) / kBrickSize;
             const int64_t bz0 = (lo[2] - grid_min.z) / kBrickSize;
@@ -179,6 +204,8 @@ namespace o_voxel::fdg
             GridSpec grid,
             Emit emit)
         {
+            // Shared scanline generator used by occupancy and QEF passes. The
+            // template callback keeps both passes on the exact same event stream.
             const int ax2 = task.axis;
             const int ax0 = (ax2 + 1) % 3;
             const int ax1 = (ax2 + 2) % 3;
@@ -191,6 +218,8 @@ namespace o_voxel::fdg
                 {static_cast<double>(tri[6 + ax0]), static_cast<double>(tri[6 + ax1]), static_cast<double>(tri[6 + ax2])},
             };
             int order[3] = {0, 1, 2};
+            // Sort vertices by the scan row axis so the triangle can be scanned
+            // as two monotonic halves: top->middle and middle->bottom.
             if (t[order[0]][1] > t[order[1]][1])
             {
                 const int tmp = order[0];
@@ -220,10 +249,14 @@ namespace o_voxel::fdg
 
             auto scan_half = [&](int row_start, int row_end, const double *a, const double *b, const double *c)
             {
+                // For each scan row, intersect the row with two triangle edges,
+                // then interpolate along the horizontal span to recover depth.
                 row_start = max(row_start, task.v0);
                 row_end = min(row_end, task.v1);
                 for (int y_idx = row_start; y_idx < row_end; ++y_idx)
                 {
+                    // y and x use the high cell boundary, matching the original
+                    // event placement for voxel face crossings.
                     const double y = (static_cast<double>(y_idx) + 1.0) * vs[ax1];
                     const double ab = fabs(a[1] - b[1]) < 1e-12 ? 0.0 : (y - a[1]) / (b[1] - a[1]);
                     const double ac = fabs(a[1] - c[1]) < 1e-12 ? 0.0 : (y - a[1]) / (c[1] - a[1]);
@@ -248,6 +281,8 @@ namespace o_voxel::fdg
                     for (int x_idx = line_start; x_idx < line_end; ++x_idx)
                     {
                         const double x = (static_cast<double>(x_idx) + 1.0) * vs[ax0];
+                        // alpha moves across the row segment; z is the point
+                        // where the triangle plane crosses this projected event.
                         const double alpha = fabs(t4x - t3x) < 1e-12 ? 0.0 : (x - t3x) / (t4x - t3x);
                         const double z = (1.0 - alpha) * t3z + alpha * t4z;
                         const int z_idx = static_cast<int>(z / vs[ax2]);
@@ -268,6 +303,9 @@ namespace o_voxel::fdg
             Int3 &brick,
             int &local_id)
         {
+            // Split one voxel coordinate into a brick key plus a local bit id.
+            // The key addresses the hash table; local_id addresses the 512-bit
+            // occupancy mask inside that brick.
             const Int3 grid_min = grid.grid_min;
             const Int3 grid_max = grid.grid_max;
             const int rx = x - grid_min.x;
@@ -299,6 +337,9 @@ namespace o_voxel::fdg
             uint64_t slot = mix64(key) & (hash_capacity - 1);
             for (uint64_t probe = 0; probe < hash_capacity; ++probe)
             {
+                // The first thread that installs the key owns brick allocation.
+                // Other threads finding the same key wait until hash_vals is
+                // published, then reuse the existing compact brick index.
                 const uint64_t prev = atomicCAS(
                     reinterpret_cast<unsigned long long *>(hash_keys + slot),
                     static_cast<unsigned long long>(kEmptyBrickKey),
@@ -324,6 +365,8 @@ namespace o_voxel::fdg
                 {
                     volatile uint32_t *val_ptr = hash_vals + slot;
                     uint32_t val = *val_ptr;
+                    // key becomes visible before value; spin only on that slot
+                    // until the creating thread publishes the brick index.
                     while (val == kEmptyBrickVal)
                         val = *val_ptr;
                     return val == kOverflowBrickVal ? kEmptyBrickVal : val;
@@ -336,6 +379,8 @@ namespace o_voxel::fdg
 
         __device__ __forceinline__ SymQEF10 triangle_qef(const float *tri)
         {
+            // Plane QEF for the triangle itself. The normal uses the same edge
+            // order as the CPU path so the plane sign and d term stay aligned.
             const float e0x = tri[3] - tri[0];
             const float e0y = tri[4] - tri[1];
             const float e0z = tri[5] - tri[2];
@@ -354,6 +399,8 @@ namespace o_voxel::fdg
 
         __device__ __forceinline__ void atomic_add_qef(float *dst, const SymQEF10 &q)
         {
+            // Multiple scan tasks can hit the same compact voxel row, so every
+            // matrix coefficient is accumulated atomically.
             atomicAdd(dst + 0, q.q00);
             atomicAdd(dst + 1, q.q01);
             atomicAdd(dst + 2, q.q02);
@@ -377,6 +424,8 @@ namespace o_voxel::fdg
                 return;
             const int64_t tri_id = pair_id / 3;
             const int axis = static_cast<int>(pair_id - tri_id * 3);
+            // Parallel unit is (triangle, depth axis). Large projected boxes
+            // become many fixed-size tile tasks instead of one long thread.
             int u0, u1, v0, v1;
             if (!compute_scan_bbox(triangles + tri_id * 9, axis, grid, u0, u1, v0, v1))
             {
@@ -405,6 +454,9 @@ namespace o_voxel::fdg
                 return;
 
             int64_t out = task_offsets[pair_id];
+            // task_offsets is the CUB exclusive scan of per-pair task counts.
+            // Each thread owns a disjoint output range and writes all tiles for
+            // its (triangle, axis) pair.
             for (int v = v0; v < v1; v += kTileV)
             {
                 for (int u = u0; u < u1; u += kTileU)
@@ -447,6 +499,9 @@ namespace o_voxel::fdg
             const float *tri = triangles + static_cast<int64_t>(task.tri_id) * 9;
             auto emit = [&](int ax0, int ax1, int ax2, int x_idx, int y_idx, int z_idx, double, double, double)
             {
+                // One geometric event activates the four voxels around the
+                // crossed face in the projection plane. This is the occupancy
+                // subset later reused by face and boundary QEF stages.
                 for (int dx = 0; dx < 2; ++dx)
                 {
                     for (int dy = 0; dy < 2; ++dy)
@@ -483,6 +538,8 @@ namespace o_voxel::fdg
             const int64_t brick_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
             if (brick_idx >= num_bricks)
                 return;
+            // Popcount turns each brick bitset into the number of compact voxel
+            // rows owned by that brick.
             int64_t count = 0;
             const uint32_t *bits = brick_bits + brick_idx * kBrickBitWords;
             for (int i = 0; i < kBrickBitWords; ++i)
@@ -511,6 +568,8 @@ namespace o_voxel::fdg
             {
                 if ((bits[local_id / 32] & (1u << (local_id & 31))) == 0)
                     continue;
+                // Enumerating local_id in increasing order defines the local
+                // row order inside this compact active brick.
                 const int lz = local_id / (kBrickSize * kBrickSize);
                 const int rem = local_id - lz * kBrickSize * kBrickSize;
                 const int ly = rem / kBrickSize;
@@ -548,6 +607,9 @@ namespace o_voxel::fdg
             const SymQEF10 qef = triangle_qef(tri);
             auto emit = [&](int ax0, int ax1, int ax2, int x_idx, int y_idx, int z_idx, double x, double y, double z)
             {
+                // Replay the same event stream used for occupancy. This pass now
+                // maps each active voxel to its compact row and accumulates the
+                // intersection point and triangle plane QEF.
                 for (int dx = 0; dx < 2; ++dx)
                 {
                     for (int dy = 0; dy < 2; ++dy)
@@ -578,6 +640,9 @@ namespace o_voxel::fdg
                         atomicAdd(mean_sum + 3 * out_idx + 1, p[1]);
                         atomicAdd(mean_sum + 3 * out_idx + 2, p[2]);
                         atomicAdd(cnt + out_idx, 1.0f);
+                        // The base event marks which grid edge direction was
+                        // crossed. Neighbor voxels receive QEF/mean updates but
+                        // should not duplicate the axis flag.
                         if (dx == 0 && dy == 0)
                             atomicOr(intersected_mask + out_idx, 1u << ax2);
                         atomic_add_qef(qefs + 10 * out_idx, qef);
@@ -592,6 +657,8 @@ namespace o_voxel::fdg
             int64_t n,
             bool *intersected)
         {
+            // Convert one uint32 bitfield per voxel into the public [N, 3] bool
+            // layout: bit 0/1/2 means the voxel was intersected along x/y/z.
             const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
             if (i >= n)
                 return;
@@ -619,6 +686,8 @@ namespace o_voxel::fdg
 
         int64_t read_scan_total(const torch::Tensor &counts, const torch::Tensor &offsets, int64_t n, cudaStream_t stream)
         {
+            // After an exclusive scan, total = last_count + last_offset. This
+            // small host readback gives the exact tensor size for the next pass.
             int64_t tail[2] = {0, 0};
             C10_CUDA_CHECK(cudaMemcpyAsync(
                 tail,
@@ -694,6 +763,11 @@ namespace o_voxel::fdg
             const torch::Device &device,
             cudaStream_t stream)
         {
+            // Pipeline:
+            // 1. Count and emit scan tasks for triangle-axis tiles.
+            // 2. Estimate a strict active-brick bound from those tasks.
+            // 3. Mark occupied voxel bits in active bricks through a hash table.
+            // 4. Prefix-sum brick popcounts and emit compact voxel coordinates.
             IntersectionOccupancy out;
             const Int3 grid_min = grid.grid_min;
             const Int3 grid_max = grid.grid_max;
@@ -819,11 +893,13 @@ namespace o_voxel::fdg
 
     } // namespace
 
-    torch::Tensor intersect_occ(
+    torch::Tensor intersect_occ_cuda(
         const torch::Tensor &triangles,
         const torch::Tensor &voxel_size,
         const torch::Tensor &grid_range)
     {
+        // Same occupancy construction as intersect_qef_cuda, but no QEF,
+        // mean/cnt, or intersected mask work is performed.
         TORCH_CHECK(triangles.is_cuda(), "triangles must be a CUDA tensor");
 
         const c10::cuda::CUDAGuard guard(triangles.device());
@@ -849,11 +925,13 @@ namespace o_voxel::fdg
         torch::Tensor,
         torch::Tensor,
         torch::Tensor>
-    intersect_qef(
+    intersect_qef_cuda(
         const torch::Tensor &triangles,
         const torch::Tensor &voxel_size,
         const torch::Tensor &grid_range)
     {
+        // Start from the shared occupancy pass, then accumulate the intersection
+        // planes and per-axis flags needed by the full flexible dual grid solve.
         TORCH_CHECK(triangles.is_cuda(), "triangles must be a CUDA tensor");
 
         const c10::cuda::CUDAGuard guard(triangles.device());

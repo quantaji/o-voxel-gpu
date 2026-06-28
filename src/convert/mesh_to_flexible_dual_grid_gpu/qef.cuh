@@ -10,6 +10,8 @@ namespace o_voxel::fdg
         return SymQEF10{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
     }
 
+    // Small value helpers kept host/device so the same QEF math can be used in
+    // kernels and in any light host-side setup code.
     __host__ __device__ __forceinline__ SymQEF10 qef_add(
         const SymQEF10 &a,
         const SymQEF10 &b)
@@ -28,6 +30,8 @@ namespace o_voxel::fdg
         };
     }
 
+    // Scaling folds a stage weight into a QEF before it is accumulated into the
+    // running per-voxel total.
     __host__ __device__ __forceinline__ SymQEF10 qef_scale(
         const SymQEF10 &q,
         float s)
@@ -48,6 +52,7 @@ namespace o_voxel::fdg
 
     __host__ __device__ __forceinline__ SymQEF10 qef_from_plane(float4 p)
     {
+        // Plane ax + by + cz + d = 0 contributes p * p^T in SymQEF10 layout.
         const float a = p.x;
         const float b = p.y;
         const float c = p.z;

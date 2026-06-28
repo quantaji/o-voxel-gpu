@@ -24,6 +24,7 @@ else:
 
 setup(
     name="o_voxel",
+    python_requires=">=3.8",
     packages=[
         "o_voxel",
         "o_voxel.convert",

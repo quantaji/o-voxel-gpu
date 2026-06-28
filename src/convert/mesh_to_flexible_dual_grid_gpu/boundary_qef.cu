@@ -1,4 +1,4 @@
-#include "api.h"
+#include "../api.h"
 
 #include "types.cuh"
 
@@ -10,6 +10,10 @@
 
 #include <cstdint>
 
+// Boundary QEFs are accumulated by walking each boundary segment through the
+// voxel grid. A thread visits the voxels crossed by one segment, looks them up
+// in the active-brick structure built by intersect_qef_cuda, and adds directly
+// into the running qefs tensor.
 namespace o_voxel::fdg
 {
     namespace
@@ -32,6 +36,9 @@ namespace o_voxel::fdg
             bool &cached_found,
             float *out_qefs)
         {
+            // Map a voxel coordinate to its compact row and add one QEF. The
+            // brick cache avoids repeating the hash lookup while a segment stays
+            // within the same 8x8x8 brick.
             if (x < grid.grid_min.x || x >= grid.grid_max.x)
                 return;
             if (y < grid.grid_min.y || y >= grid.grid_max.y)
@@ -50,6 +57,9 @@ namespace o_voxel::fdg
             const int lz = rz - bz * kBrickSize;
             const int local_id = lx + kBrickSize * (ly + kBrickSize * lz);
 
+            // Boundary DDA often visits many consecutive voxels in the same
+            // brick. Reuse the previous lookup until the brick coordinate
+            // changes.
             if (bx != cached_bx || by != cached_by || bz != cached_bz)
             {
                 cached_bx = bx;
@@ -71,6 +81,8 @@ namespace o_voxel::fdg
             const uint32_t mask = bit == 0 ? 0u : ((1u << bit) - 1u);
             rank += __popc(cached_bits[word] & mask);
 
+            // Compact row inside qefs is the brick's base row plus the number
+            // of active local bits before this voxel.
             float *dst = out_qefs + 10 * (cached_base + rank);
             atomicAdd(dst + 0, qef.q00);
             atomicAdd(dst + 1, qef.q01);
@@ -92,6 +104,8 @@ namespace o_voxel::fdg
             BrickLookup lookup,
             float *__restrict__ out_qefs)
         {
+            // One thread handles one boundary segment and advances through grid
+            // cells in DDA order until the segment length is reached.
             const int64_t eid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
             if (eid >= num_boundaries)
                 return;
@@ -110,6 +124,9 @@ namespace o_voxel::fdg
             const double dir_x = dx / segment_length;
             const double dir_y = dy / segment_length;
             const double dir_z = dz / segment_length;
+            // Squared distance to a line through p0 with unit direction d:
+            // ||(I - d d^T)(x - p0)||^2. The symmetric matrix below stores
+            // A = I - d d^T, b = -A*p0, c = p0^T*A*p0 in QEF form.
             const float a00 = 1.0f - static_cast<float>(dir_x * dir_x);
             const float a01 = -static_cast<float>(dir_x * dir_y);
             const float a02 = -static_cast<float>(dir_x * dir_z);
@@ -142,6 +159,9 @@ namespace o_voxel::fdg
             int cur_y = static_cast<int>(floorf(p0.y / grid.voxel_size.y));
             int cur_z = static_cast<int>(floorf(p0.z / grid.voxel_size.z));
 
+            // tmax_* is the distance along the segment to the next grid plane on
+            // that axis. tdelta_* is the distance between later grid-plane
+            // crossings on the same axis.
             double tmax_x;
             double tmax_y;
             double tmax_z;
@@ -208,6 +228,8 @@ namespace o_voxel::fdg
             while (true)
             {
                 int axis;
+                // Advance to the nearest next grid plane, visit the voxel on the
+                // other side, and stop once that crossing would be past p1.
                 if (tmax_x < tmax_y)
                     axis = (tmax_x < tmax_z) ? 0 : 2;
                 else
@@ -255,7 +277,7 @@ namespace o_voxel::fdg
 
     } // namespace
 
-    torch::Tensor boundary_qef(
+    torch::Tensor boundary_qef_cuda(
         const torch::Tensor &boundaries,
         const torch::Tensor &voxel_size,
         const torch::Tensor &grid_range,
@@ -267,6 +289,8 @@ namespace o_voxel::fdg
         const torch::Tensor &brick_bits,
         const torch::Tensor &brick_base)
     {
+        // qefs is an in-place accumulator. boundary_weight is already folded
+        // into each segment QEF before the atomic adds.
         TORCH_CHECK(boundaries.is_cuda(), "boundaries must be a CUDA tensor");
         TORCH_CHECK(voxels.is_cuda(), "voxels must be a CUDA tensor");
         static_assert(sizeof(SymQEF10) == sizeof(float) * 10, "Unexpected SymQEF10 layout");

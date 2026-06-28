@@ -1,4 +1,4 @@
-#include "api.h"
+#include "../api.h"
 
 #include "qef.cuh"
 
@@ -12,6 +12,10 @@
 #include <cmath>
 #include <cstdint>
 
+// Full CUDA flexible dual grid pipeline. It follows the CPU algorithm's
+// semantics, but each stage is expressed as GPU work: gather triangles, build
+// intersection QEFs, add face and boundary QEFs in-place, then solve one QEF per
+// active voxel.
 namespace o_voxel::fdg
 {
     namespace
@@ -35,6 +39,8 @@ namespace o_voxel::fdg
 
         __host__ __device__ __forceinline__ uint64_t pack_edge_key(int32_t a, int32_t b)
         {
+            // Callers pass endpoints sorted as (min, max), so the same
+            // undirected mesh edge from two faces lands in the same hash slot.
             return (static_cast<uint64_t>(static_cast<uint32_t>(a)) << 32) |
                    static_cast<uint32_t>(b);
         }
@@ -61,6 +67,9 @@ namespace o_voxel::fdg
 
         namespace small_cpqr
         {
+            // Small column-pivoted QR routines used by the constrained QEF
+            // solver. This keeps the CUDA solve aligned with the CPU path
+            // instead of using a closed-form solver with different numerical behavior.
             namespace detail
             {
 
@@ -107,6 +116,9 @@ namespace o_voxel::fdg
                     float *tau,
                     float *essential_out)
                 {
+                    // Build a Householder reflector that zeroes the tail of a
+                    // column. This is the small-matrix version of QR
+                    // factorization used by the voxel-local QEF solve.
                     float tail_sq_norm = 0.0f;
                     for (int i = 0; i < N - 1; ++i)
                         if (i < tail_len)
@@ -209,6 +221,9 @@ namespace o_voxel::fdg
                     const float *b_in,
                     float *x_out)
                 {
+                    // Column-pivoted QR handles rank-deficient QEF systems: if
+                    // the plane constraints do not determine all coordinates,
+                    // low-norm columns are moved to the end and dropped.
                     float qr[N * N];
                     float c[N];
                     int perm[N];
@@ -225,6 +240,9 @@ namespace o_voxel::fdg
                         x_out[i] = 0.0f;
                     }
 
+                    // Track both exact and downdated column norms. Pivoting on
+                    // the largest remaining norm improves stability for nearly
+                    // degenerate local systems.
                     for (int j = 0; j < N; ++j)
                     {
                         float norm_sq = 0.0f;
@@ -245,6 +263,8 @@ namespace o_voxel::fdg
 
                     for (int k = 0; k < N; ++k)
                     {
+                        // Choose the strongest remaining column as the next
+                        // pivot, then apply a Householder reflector to form R.
                         int biggest_col_index = k;
                         float best_updated = col_norms_updated[k];
                         for (int j = 0; j < N; ++j)
@@ -274,6 +294,9 @@ namespace o_voxel::fdg
                         if (k < nonzero_pivots)
                             apply_householder_left_vector<N>(c, k, essential, tail_len, tau);
 
+                        // Cheap norm downdates avoid recomputing every column
+                        // norm after each reflector; recompute only when the
+                        // downdate becomes unreliable.
                         for (int j = 0; j < N; ++j)
                         {
                             if (j <= k || col_norms_updated[j] == 0.0f)
@@ -303,6 +326,8 @@ namespace o_voxel::fdg
 
                     if (nonzero_pivots == 0)
                         return;
+                    // Solve the retained upper-triangular part and undo the
+                    // pivot permutation. Dropped columns stay zero.
                     backsolve_upper_ranked<N>(qr, nonzero_pivots, c, perm, x_out);
                 }
 
@@ -330,6 +355,8 @@ namespace o_voxel::fdg
 
         __device__ __forceinline__ void sym10_to_dense4x4(const SymQEF10 &q, float Q[16])
         {
+            // Expand compact symmetric storage so the solver can evaluate
+            // p^T Q p and extract 3x3/2x2 constrained systems directly.
             Q[idx4(0, 0)] = q.q00;
             Q[idx4(0, 1)] = q.q01;
             Q[idx4(0, 2)] = q.q02;
@@ -357,6 +384,8 @@ namespace o_voxel::fdg
 
         __device__ __forceinline__ float qef_error4(const float Q[16], const float p[4])
         {
+            // Homogeneous point p=(x,y,z,1). The scalar p^T Q p is the total
+            // squared plane/line distance represented by the accumulated QEF.
             const float y0 = Q[idx4(0, 0)] * p[0] + Q[idx4(0, 1)] * p[1] + Q[idx4(0, 2)] * p[2] + Q[idx4(0, 3)] * p[3];
             const float y1 = Q[idx4(1, 0)] * p[0] + Q[idx4(1, 1)] * p[1] + Q[idx4(1, 2)] * p[2] + Q[idx4(1, 3)] * p[3];
             const float y2 = Q[idx4(2, 0)] * p[0] + Q[idx4(2, 1)] * p[1] + Q[idx4(2, 2)] * p[2] + Q[idx4(2, 3)] * p[3];
@@ -373,6 +402,9 @@ namespace o_voxel::fdg
             if (regularization_weight <= 0.0f || cnt <= 0.0f)
                 return;
 
+            // Regularization adds w * ||x - mean_intersection||^2. It keeps the
+            // solve near the observed intersection points when QEF planes alone
+            // are under-constrained.
             const float px = mean_sum[0] / cnt;
             const float py = mean_sum[1] / cnt;
             const float pz = mean_sum[2] / cnt;
@@ -400,6 +432,8 @@ namespace o_voxel::fdg
         {
             const int ax1 = (fixed_axis + 1) % 3;
             const int ax2 = (fixed_axis + 2) % 3;
+            // Candidate on one voxel face: fix one coordinate to min or max and
+            // solve the remaining 2D QEF on that face.
             float A2[4] = {
                 Q[idx4(ax1, ax1)], Q[idx4(ax1, ax2)],
                 Q[idx4(ax2, ax1)], Q[idx4(ax2, ax2)]};
@@ -445,6 +479,8 @@ namespace o_voxel::fdg
         {
             const int ax1 = (free_axis + 1) % 3;
             const int ax2 = (free_axis + 2) % 3;
+            // Candidate on one voxel edge: fix two coordinates to box bounds and
+            // solve the remaining 1D minimizer along the free axis.
             const float a = Q[idx4(free_axis, free_axis)];
             const float b0 = Q[idx4(free_axis, ax1)];
             const float b1 = Q[idx4(free_axis, ax2)];
@@ -484,6 +520,8 @@ namespace o_voxel::fdg
             float &best,
             float v_new[3])
         {
+            // Final fallback candidates are the eight box corners. This makes
+            // the constrained search complete over the voxel box boundary.
             for (int cx = 0; cx < 2; ++cx)
             {
                 for (int cy = 0; cy < 2; ++cy)
@@ -521,6 +559,8 @@ namespace o_voxel::fdg
             const int64_t f = tid / 3;
             const int lv = static_cast<int>(tid - 3 * f);
             const int32_t vid = faces[3 * f + lv];
+            // One thread copies one face vertex, producing a dense [F,3,3]
+            // triangle tensor consumed by the three QEF stages.
             triangles[3 * tid + 0] = vertices[3 * static_cast<int64_t>(vid) + 0];
             triangles[3 * tid + 1] = vertices[3 * static_cast<int64_t>(vid) + 1];
             triangles[3 * tid + 2] = vertices[3 * static_cast<int64_t>(vid) + 2];
@@ -553,6 +593,8 @@ namespace o_voxel::fdg
                     a = b;
                     b = tmp;
                 }
+                // Count each undirected edge. Interior manifold edges are seen
+                // twice; boundary edges are seen once.
                 const uint64_t key = pack_edge_key(a, b);
                 uint64_t slot = mix64(key) & (hash_capacity - 1);
                 bool inserted = false;
@@ -584,6 +626,7 @@ namespace o_voxel::fdg
             const uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
             if (i >= hash_capacity)
                 return;
+            // A valid hash slot with count one is exactly one boundary edge.
             if (hash_keys[i] != kEmptyEdgeKey && edge_counts[i] == 1u)
                 atomicAdd(boundary_count, 1u);
         }
@@ -605,6 +648,8 @@ namespace o_voxel::fdg
             const uint32_t out = atomicAdd(boundary_count, 1u);
             const int32_t v0 = edge_key_v0(hash_keys[i]);
             const int32_t v1 = edge_key_v1(hash_keys[i]);
+            // Emit the two endpoint positions in grid-local coordinates for the
+            // boundary DDA kernel.
             boundaries[6 * static_cast<int64_t>(out) + 0] = vertices[3 * static_cast<int64_t>(v0) + 0];
             boundaries[6 * static_cast<int64_t>(out) + 1] = vertices[3 * static_cast<int64_t>(v0) + 1];
             boundaries[6 * static_cast<int64_t>(out) + 2] = vertices[3 * static_cast<int64_t>(v0) + 2];
@@ -630,6 +675,7 @@ namespace o_voxel::fdg
             const int x = voxels[3 * i + 0];
             const int y = voxels[3 * i + 1];
             const int z = voxels[3 * i + 2];
+            // The dual vertex for this voxel must remain inside this voxel box.
             const float min_corner[3] = {
                 x * voxel_size.x,
                 y * voxel_size.y,
@@ -650,6 +696,7 @@ namespace o_voxel::fdg
             };
             add_qef_regularization_inplace(Q, mean_i, cnt[i], regularization_weight);
 
+            // First solve the unconstrained 3D minimizer of p^T Q p with p.w=1.
             const float A3[9] = {
                 Q[idx4(0, 0)], Q[idx4(0, 1)], Q[idx4(0, 2)],
                 Q[idx4(1, 0)], Q[idx4(1, 1)], Q[idx4(1, 2)],
@@ -660,6 +707,9 @@ namespace o_voxel::fdg
 
             if (!point_inside_box3(v_new, min_corner, max_corner))
             {
+                // If the best unconstrained point leaves the voxel, search the
+                // voxel boundary: first faces, then edges, then corners. Each
+                // candidate is scored with the full 4x4 QEF.
                 float best = CUDART_INF_F;
                 try_single_constraint(Q, 0, min_corner, max_corner, best, v_new);
                 try_single_constraint(Q, 1, min_corner, max_corner, best, v_new);
@@ -679,6 +729,9 @@ namespace o_voxel::fdg
             const torch::Tensor &vertices,
             const torch::Tensor &faces)
         {
+            // Boundary extraction uses a hash table over undirected mesh edges.
+            // An edge seen exactly once is a boundary edge and is emitted as a
+            // [2, 3] segment for boundary_qef_cuda.
             const c10::cuda::CUDAGuard guard(vertices.device());
             const cudaStream_t stream = at::cuda::getCurrentCUDAStream(vertices.get_device()).stream();
             const torch::Device device = vertices.device();
@@ -751,6 +804,9 @@ namespace o_voxel::fdg
         float boundary_weight,
         float regularization_weight)
     {
+        // CUDA version of the Python/CPU flexible dual grid entry point:
+        // vertices/faces -> triangles -> intersection QEF -> face QEF ->
+        // boundary QEF -> constrained solve.
         TORCH_CHECK(vertices.is_cuda(), "vertices must be a CUDA tensor");
         TORCH_CHECK(faces.is_cuda(), "faces must be a CUDA tensor");
         static_assert(sizeof(SymQEF10) == sizeof(float) * 10, "Unexpected SymQEF10 layout");
@@ -773,7 +829,7 @@ namespace o_voxel::fdg
             C10_CUDA_KERNEL_LAUNCH_CHECK();
         }
 
-        auto intersect = intersect_qef(triangles, voxel_size, grid_range);
+        auto intersect = intersect_qef_cuda(triangles, voxel_size, grid_range);
         torch::Tensor voxels = std::get<0>(intersect);
         torch::Tensor mean_sum = std::get<1>(intersect);
         torch::Tensor cnt = std::get<2>(intersect);
@@ -792,7 +848,7 @@ namespace o_voxel::fdg
         }
 
         if (face_weight > 0.0f)
-            face_qef(
+            face_qef_cuda(
                 triangles,
                 voxel_size,
                 grid_range,
@@ -808,7 +864,7 @@ namespace o_voxel::fdg
         {
             torch::Tensor boundaries = extract_boundaries_cuda(vertices, faces);
             if (boundaries.size(0) > 0)
-                boundary_qef(
+                boundary_qef_cuda(
                     boundaries,
                     voxel_size,
                     grid_range,

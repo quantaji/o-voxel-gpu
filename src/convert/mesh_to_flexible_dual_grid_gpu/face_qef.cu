@@ -1,4 +1,4 @@
-#include "api.h"
+#include "../api.h"
 
 #include "qef.cuh"
 
@@ -10,6 +10,10 @@
 
 #include <cstdint>
 
+// Face QEFs are accumulated as a triangle-brick task stream. Each task checks
+// one triangle against one active brick-sized region, scans only voxels that are
+// already active in that brick, and adds face_weight * plane_qef directly into
+// the running qefs tensor.
 namespace o_voxel::fdg
 {
     namespace
@@ -17,6 +21,7 @@ namespace o_voxel::fdg
 
         constexpr int kThreads = 256;
 
+        // A compact work item: triangle tri_id tested against brick (bx, by, bz).
         struct FaceBrickTask
         {
             int32_t tri_id;
@@ -63,6 +68,9 @@ namespace o_voxel::fdg
             const Int3 grid_min = grid.grid_min;
             const Int3 grid_max = grid.grid_max;
 
+            // The first pass only counts how many active-brick-sized regions a
+            // triangle's voxel bbox can overlap. CUB scan then gives each
+            // triangle a compact output range for task emission.
             float min_x = tri[0] < tri[3] ? tri[0] : tri[3];
             min_x = min_x < tri[6] ? min_x : tri[6];
             float min_y = tri[1] < tri[4] ? tri[1] : tri[4];
@@ -94,6 +102,9 @@ namespace o_voxel::fdg
             const int bx1 = (bb_max_x - 1 - grid_min.x) / kBrickSize;
             const int by1 = (bb_max_y - 1 - grid_min.y) / kBrickSize;
             const int bz1 = (bb_max_z - 1 - grid_min.z) / kBrickSize;
+            // One FaceBrickTask is cheaper than asking every active voxel to
+            // test every triangle. Later, the task only scans active bits inside
+            // that brick.
             task_counts[tri_id] =
                 static_cast<int64_t>(bx1 - bx0 + 1) *
                 static_cast<int64_t>(by1 - by0 + 1) *
@@ -146,6 +157,9 @@ namespace o_voxel::fdg
             const int bz1 = (bb_max_z - 1 - grid_min.z) / kBrickSize;
 
             int64_t out = task_offsets[tri_id];
+            // The task grid is triangle bbox clipped to brick coordinates. It is
+            // intentionally conservative; accumulate_face_qef_kernel performs
+            // the triangle/voxel-box overlap test.
             for (int bz = bz0; bz <= bz1; ++bz)
                 for (int by = by0; by <= by1; ++by)
                     for (int bx = bx0; bx <= bx1; ++bx)
@@ -168,6 +182,8 @@ namespace o_voxel::fdg
             const FaceBrickTask task = tasks[task_id];
             const uint32_t *bits;
             int64_t base;
+            // If the triangle bbox brick was never activated by intersect_qef,
+            // it has no output rows and the whole task can be skipped.
             if (!lookup_brick_bits_and_base(task.bx, task.by, task.bz, grid, lookup, &bits, &base))
                 return;
 
@@ -193,6 +209,8 @@ namespace o_voxel::fdg
             const float nx = n.x;
             const float ny = n.y;
             const float nz = n.z;
+            // Face QEF is the squared distance to the triangle plane, scaled
+            // once here before all matching voxels receive it.
             const SymQEF10 qef = qef_scale(
                 qef_from_plane(make_float4(nx, ny, nz, -(nx * v0.x + ny * v0.y + nz * v0.z))),
                 face_weight);
@@ -223,6 +241,9 @@ namespace o_voxel::fdg
             const float d1 = nx * (c_x - v0.x) + ny * (c_y - v0.y) + nz * (c_z - v0.z);
             const float d2 = nx * (vs[0] - c_x - v0.x) + ny * (vs[1] - c_y - v0.y) + nz * (vs[2] - c_z - v0.z);
 
+            // Plane slab test: choose the two voxel-box corners that are most
+            // separated along the triangle normal. If both signed distances have
+            // the same sign, the box cannot cross the triangle plane.
             const int mul_xy = nz < 0.0f ? -1 : 1;
             const float n_xy_e0_x = -mul_xy * e0y;
             const float n_xy_e0_y = mul_xy * e0x;
@@ -256,6 +277,10 @@ namespace o_voxel::fdg
             const float d_zx_e1 = -(n_zx_e1_x * v1.z + n_zx_e1_y * v1.x) + fmaxf(n_zx_e1_x, 0.0f) * vs[2] + fmaxf(n_zx_e1_y, 0.0f) * vs[0];
             const float d_zx_e2 = -(n_zx_e2_x * v2.z + n_zx_e2_y * v2.x) + fmaxf(n_zx_e2_x, 0.0f) * vs[2] + fmaxf(n_zx_e2_y, 0.0f) * vs[0];
 
+            // The xy/yz/zx edge functions are projected half-space tests. The
+            // fmax terms move the sampled box corner to the side most favorable
+            // to overlap, making this a voxel-box vs triangle test rather than
+            // a point-in-triangle test.
             int rank_before_word = 0;
             for (int word = 0; word < kBrickBitWords; ++word)
             {
@@ -267,6 +292,8 @@ namespace o_voxel::fdg
                     const int bit = __ffs(active) - 1;
                     const int local_id = word * 32 + bit;
                     const int local_rank = rank_before_word + rank_in_word;
+                    // local_rank is the number of active bits before this voxel
+                    // in the brick, so base + local_rank is the compact qef row.
                     const int lz = local_id / (kBrickSize * kBrickSize);
                     const int rem = local_id - lz * kBrickSize * kBrickSize;
                     const int ly = rem / kBrickSize;
@@ -284,6 +311,9 @@ namespace o_voxel::fdg
                         const float pz = z * vs[2];
                         const float n_dot_p = nx * px + ny * py + nz * pz;
                         bool hit = true;
+                        // Reject if the voxel box is entirely on one side of
+                        // the triangle plane, or outside any projected edge
+                        // half-space.
                         if ((n_dot_p + d1) * (n_dot_p + d2) > 0.0f)
                             hit = false;
                         if (n_xy_e0_x * px + n_xy_e0_y * py + d_xy_e0 < 0.0f)
@@ -306,6 +336,9 @@ namespace o_voxel::fdg
                             hit = false;
                         if (hit)
                         {
+                            // Different triangle-brick tasks can contribute to
+                            // the same voxel, so the total QEF is accumulated
+                            // with atomic adds.
                             float *dst = out_qefs + 10 * (base + local_rank);
                             atomicAdd(dst + 0, qef.q00);
                             atomicAdd(dst + 1, qef.q01);
@@ -329,7 +362,7 @@ namespace o_voxel::fdg
 
     } // namespace
 
-    torch::Tensor face_qef(
+    torch::Tensor face_qef_cuda(
         const torch::Tensor &triangles,
         const torch::Tensor &voxel_size,
         const torch::Tensor &grid_range,
@@ -341,6 +374,8 @@ namespace o_voxel::fdg
         const torch::Tensor &brick_bits,
         const torch::Tensor &brick_base)
     {
+        // qefs is an in-place accumulator. No separate face-QEF buffer is
+        // allocated; the caller should pass the running total QEF tensor.
         TORCH_CHECK(triangles.is_cuda(), "triangles must be a CUDA tensor");
         TORCH_CHECK(voxels.is_cuda(), "voxels must be a CUDA tensor");
 
@@ -373,6 +408,8 @@ namespace o_voxel::fdg
         auto task_counts = torch::empty({num_triangles}, opts_i64);
         auto task_offsets = torch::empty({num_triangles}, opts_i64);
         int blocks = static_cast<int>((num_triangles + kThreads - 1) / kThreads);
+        // count -> exclusive scan -> emit keeps task storage exact while still
+        // letting every triangle count its brick work independently.
         count_face_brick_tasks_kernel<<<blocks, kThreads, 0, stream>>>(
             triangles.data_ptr<float>(),
             num_triangles,

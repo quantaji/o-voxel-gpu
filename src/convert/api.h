@@ -24,7 +24,7 @@
  * @param regularization_weight: Regularization factor to apply to the QEM matrices.
  * @param timing: Boolean flag to indicate whether to print timing information.
  *
- * @return a tuple ((x, y, z), vertices, intersected, faces) containing the remeshed vertices and the corresponding voxel grid.
+ * @return a tuple (voxels, dual_vertices, intersected) containing the sparse dual grid.
  */
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> mesh_to_flexible_dual_grid_cpu(
     const torch::Tensor &vertices,
@@ -36,14 +36,52 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> mesh_to_flexible_dual_gr
     float regularization_weight,
     bool timing);
 
+/**
+ * CPU-only occupancy pass for pre-gathered triangles.
+ *
+ * Input triangles are [T, 3, 3] float32 in grid-local coordinates. The function
+ * uses the same triangle/voxel intersection rules as the CPU flexible dual grid
+ * pipeline, but returns only occupied voxel coordinates [N, 3] int32.
+ */
+torch::Tensor intersect_occ_cpu(
+    const torch::Tensor &triangles,
+    const torch::Tensor &voxel_size,
+    const torch::Tensor &grid_range);
+
 namespace o_voxel::fdg
 {
 
-    torch::Tensor intersect_occ(
+    /**
+     * CUDA occupancy pass for pre-gathered triangles.
+     *
+     * This shares the same active-brick construction used by intersect_qef_cuda,
+     * but stops after compacting occupied voxels. It is useful when only
+     * occupancy is needed and mean/QEF/intersection flags would be wasted work.
+     */
+    torch::Tensor intersect_occ_cuda(
         const torch::Tensor &triangles,
         const torch::Tensor &voxel_size,
         const torch::Tensor &grid_range);
 
+    /**
+     * CUDA triangle intersection and QEF pass.
+     *
+     * Input triangles are [T, 3, 3] float32 in grid-local coordinates. Large
+     * triangles are split into small scan tasks so many GPU threads can share
+     * their work. The return tuple is:
+     *   0 voxels          [N, 3]  int32
+     *   1 mean_sum        [N, 3]  float32
+     *   2 cnt             [N]     float32
+     *   3 intersected     [N, 3]  bool
+     *   4 qefs            [N, 10] float32, SymQEF10 layout
+     *   5 brick_hash_keys [H]     uint64
+     *   6 brick_hash_vals [H]     uint32
+     *   7 brick_bits      [B, 16] uint32
+     *   8 brick_base      [B]     int64
+     *
+     * The brick hash, bitset, and base tensors are lookup data for later
+     * face_qef_cuda and boundary_qef_cuda calls.
+     */
     std::tuple<
         torch::Tensor,
         torch::Tensor,
@@ -54,12 +92,19 @@ namespace o_voxel::fdg
         torch::Tensor,
         torch::Tensor,
         torch::Tensor>
-    intersect_qef(
+    intersect_qef_cuda(
         const torch::Tensor &triangles,
         const torch::Tensor &voxel_size,
         const torch::Tensor &grid_range);
 
-    torch::Tensor face_qef(
+    /**
+     * In-place CUDA face QEF accumulation.
+     *
+     * Each triangle is paired with the active bricks overlapped by its bounding
+     * box. Threads then inspect only occupied voxels inside those bricks and add
+     * face_weight * face_qef directly into qefs [N, 10].
+     */
+    torch::Tensor face_qef_cuda(
         const torch::Tensor &triangles,
         const torch::Tensor &voxel_size,
         const torch::Tensor &grid_range,
@@ -71,7 +116,14 @@ namespace o_voxel::fdg
         const torch::Tensor &brick_bits,
         const torch::Tensor &brick_base);
 
-    torch::Tensor boundary_qef(
+    /**
+     * In-place CUDA boundary QEF accumulation.
+     *
+     * Boundaries are [E, 2, 3] float32 segments in grid-local coordinates. Each
+     * thread walks one segment through the voxel grid and adds boundary_weight *
+     * boundary_qef only to voxels found through the active brick lookup.
+     */
+    torch::Tensor boundary_qef_cuda(
         const torch::Tensor &boundaries,
         const torch::Tensor &voxel_size,
         const torch::Tensor &grid_range,
@@ -83,13 +135,30 @@ namespace o_voxel::fdg
         const torch::Tensor &brick_bits,
         const torch::Tensor &brick_base);
 
+    /**
+     * Standalone CUDA octree voxelization.
+     *
+     * This is not part of mesh_to_flexible_dual_grid_cuda. It expands octree
+     * jobs from coarse to fine cells on the GPU and returns (prim_ids, voxels),
+     * where prim_ids is [K] int32 and voxels is [K, 3] int32.
+     */
     std::tuple<torch::Tensor, torch::Tensor>
-    voxelize_mesh_octree(
+    voxelize_mesh_octree_cuda(
         const torch::Tensor &vertices,
         const torch::Tensor &faces,
         const torch::Tensor &voxel_size,
         const torch::Tensor &grid_range);
 
+    /**
+     * Full CUDA flexible dual grid pipeline.
+     *
+     * This is a parallel implementation of the CPU pipeline semantics:
+     * gather triangles, compute intersection QEFs, accumulate face and boundary
+     * QEFs in-place, then solve the constrained QEF for each voxel.
+     *
+     * @return (voxels [N, 3] int32, dual_vertices [N, 3] float32,
+     *          intersected [N, 3] bool)
+     */
     std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
     mesh_to_flexible_dual_grid_cuda(
         const torch::Tensor &vertices,

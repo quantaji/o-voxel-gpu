@@ -4,6 +4,14 @@
 
 This library provides an efficient implementation for the instant bidirectional conversion between Meshes and O-Voxels, along with tools for sparse voxel compression, serialization, and rendering.
 
+## CUDA Mesh-to-Flexible-Dual-Grid
+
+This repository focuses on a CUDA implementation of `mesh_to_flexible_dual_grid`. The goal is to reproduce the original CPU Flexible Dual Grid computation on GPU as closely as possible, including occupancy, QEF accumulation, boundary handling, and final dual-vertex solve semantics.
+
+One important CPU/GPU parity issue was CUDA FMA contraction in cross-product based normal computation: for nearly degenerate triangles, a tiny non-zero normal can be produced and then amplified by normalization. The current implementation uses an aligned cross-normalize path, and this mismatch is fixed in the tested cases.
+
+Special thanks to [`yuyujunjun/o-voxel-gpu`](https://github.com/yuyujunjun/o-voxel-gpu), which provided an important CUDA reference implementation during this rewrite.
+
 ![Overview](assets/overview.webp)
 
 ## Key Features
@@ -14,11 +22,47 @@ This library provides an efficient implementation for the instant bidirectional 
 - **💾 Efficient Compression**: Supports custom `.vxz` format for compact storage of sparse voxel structures using Z-order/Hilbert curve encoding.
 - **🛠️ Production Ready**: Tools to export converted assets directly to `.glb` with UV unwrapping and texture baking.
 
+## CUDA Performance
+
+The following numbers are from `notebooks/2026-06-27_05_mesh_to_fdg_compare.ipynb` on the `testing` branch. The test uses `notebooks/test.glb`, grid size 512, an NVIDIA GeForce RTX 4090, PyTorch 2.6.0+cu124, and CUDA 12.4. Warm time is the median warm run; memory is PyTorch-visible peak allocated memory.
+
+Benchmark labels:
+
+- `old CUDA`: earlier implementation from [`quantaji/TRELLIS.2-o-voxel-gpu-mod`](https://github.com/quantaji/TRELLIS.2-o-voxel-gpu-mod) at commit `4dac2ea`.
+- `reference CUDA`: implementation based on [`yuyujunjun/o-voxel-gpu`](https://github.com/yuyujunjun/o-voxel-gpu).
+- `this CUDA`: implementation in this repository.
+
+| Input | Method | Occ match | Intersected mismatch | Dual RMS | Cold time | Warm time | Cold peak mem | Warm peak mem |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| original, 268k verts / 280k faces | old CUDA | yes | 0 | 9.1e-5 | 152.5 ms | 140.7 ms | 2980.9 MB | 2980.9 MB |
+| original, 268k verts / 280k faces | reference CUDA | yes | 0 | 1.66e-4 | 142.1 ms | 139.4 ms | 1968.8 MB | 1968.8 MB |
+| original, 268k verts / 280k faces | this CUDA | yes | 0 | 9.1e-5 | 26.9 ms | 27.1 ms | 939.7 MB | 939.7 MB |
+| subdivided, 3.6M verts / 10.3M faces | old CUDA | yes | 0 | 1.16e-4 | 598.4 ms | 548.9 ms | 17746.3 MB | 17746.3 MB |
+| subdivided, 3.6M verts / 10.3M faces | reference CUDA | yes | 0 | 2.08e-4 | 113.9 ms | 102.2 ms | 12959.4 MB | 12959.4 MB |
+| subdivided, 3.6M verts / 10.3M faces | this CUDA | yes | 0 | 1.16e-4 | 85.9 ms | 82.1 ms | 1836.8 MB | 1836.8 MB |
+
+All rows have exact occupancy match and zero intersected-flag mismatch against the CPU implementation. Dual-vertex error is measured after canonicalizing voxel order. Separate notebooks validate `intersect_qef`, `face_qef`, and `boundary_qef` individually; the table above reports the deployment-facing full pipeline result.
+
 ## Installation
 
+### Build a CUDA wheel
+
 ```bash
-git clone -b main https://github.com/microsoft/TRELLIS.2.git --recursive
-pip install TRELLIS.2/o_voxel --no-build-isolation
+./build_wheel_cuda.sh --python 3.8 --torch 2.4.0 --cuda 11.8
+```
+
+The wheel is written to:
+
+```text
+wheels/
+```
+
+The build script uses a public CUDA devel Docker image, copies the repository into the container-local `/tmp` build directory, and writes only the final wheel to `wheels/`. Building `o_voxel._C` does not require `cumesh` or `flex_gemm`; those are runtime/postprocess dependencies and should be installed separately if `o_voxel.postprocess` is used.
+
+Install the generated wheel with:
+
+```bash
+pip install --no-deps wheels/o_voxel-*.whl
 ```
 
 ## Quick Start

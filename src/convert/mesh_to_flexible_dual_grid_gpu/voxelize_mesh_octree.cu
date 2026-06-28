@@ -1,4 +1,4 @@
-#include "api.h"
+#include "../api.h"
 
 #include "types.cuh"
 
@@ -14,6 +14,9 @@
 #include <tuple>
 #include <vector>
 
+// Standalone octree voxelization. It is kept as a public CUDA module, but the
+// main flexible dual grid CUDA path does not call it. Work is represented as an
+// octree job stream that expands from coarse cells to fine cells on the GPU.
 namespace o_voxel::fdg
 {
     namespace
@@ -22,6 +25,7 @@ namespace o_voxel::fdg
         constexpr int kThreads = 256;
         constexpr int kRootNeighborCount = 27;
 
+        // Per-face data reused while octree jobs for that face are refined.
         struct FaceDesc
         {
             float3 v0;
@@ -59,6 +63,8 @@ namespace o_voxel::fdg
 
         int64_t read_scan_total(const torch::Tensor &counts, const torch::Tensor &offsets, int64_t n, cudaStream_t stream)
         {
+            // After an exclusive scan, total = last_count + last_offset. The
+            // host loop needs this exact size before allocating next_jobs/results.
             int64_t tail[2] = {0, 0};
             C10_CUDA_CHECK(cudaMemcpyAsync(
                 tail,
@@ -157,6 +163,9 @@ namespace o_voxel::fdg
 
         __device__ bool triangle_box_hit(const FaceDesc &f, float3 box_min, float3 box_size, float3 box_max)
         {
+            // Triangle-box overlap test. AABB rejects obvious misses first; the
+            // remaining tests check whether the triangle plane crosses the box
+            // and whether the box overlaps the triangle in all three projections.
             if (!bbox_overlap_closed(f.bmin, f.bmax, box_min, box_max))
                 return false;
 
@@ -168,6 +177,9 @@ namespace o_voxel::fdg
             const float d1 = dot3(n, sub3(c, f.v0));
             const float d2 = dot3(n, sub3(sub3(box_size, c), f.v0));
 
+            // Projected edge half-spaces. The sign flip chooses inward-facing
+            // edge normals for each projection, and max2_zero shifts the tested
+            // box corner to the side most favorable to overlap.
             const int mul_xy = n.z < 0.0f ? -1 : 1;
             const float2 n_xy_e0 = make_float2(-mul_xy * f.e0.y, mul_xy * f.e0.x);
             const float2 n_xy_e1 = make_float2(-mul_xy * f.e1.y, mul_xy * f.e1.x);
@@ -202,6 +214,8 @@ namespace o_voxel::fdg
                                   dot2(max2_zero(n_zx_e2), make_float2(box_size.z, box_size.x));
 
             const float n_dot_p = dot3(n, box_min);
+            // Plane slab test: the two extreme box corners along the triangle
+            // normal must lie on opposite sides, or one side exactly on plane.
             if (((n_dot_p + d1) * (n_dot_p + d2)) > 0.0f)
                 return false;
 
@@ -248,6 +262,9 @@ namespace o_voxel::fdg
             int &root_j,
             int &root_k)
         {
+            // XOR of vertex leaf coordinates tells which octree bits differ
+            // across the triangle vertices. The highest differing bit selects
+            // the smallest common ancestor node containing all three vertex cells.
             const uint32_t diff =
                 static_cast<uint32_t>(ix0 ^ ix1) | static_cast<uint32_t>(ix0 ^ ix2) |
                 static_cast<uint32_t>(iy0 ^ iy1) | static_cast<uint32_t>(iy0 ^ iy2) |
@@ -302,6 +319,9 @@ namespace o_voxel::fdg
             const int64_t vid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
             if (vid >= num_vertices)
                 return;
+            // Convert each vertex to a leaf voxel coordinate in grid-local
+            // space. These coordinates are only used to seed each face's octree
+            // root; geometric overlap is still checked later by triangle_box_hit.
             int ix = static_cast<int>(floorf(vertices[3 * vid + 0] * inv_voxel_size.x)) - grid_min.x;
             int iy = static_cast<int>(floorf(vertices[3 * vid + 1] * inv_voxel_size.y)) - grid_min.y;
             int iz = static_cast<int>(floorf(vertices[3 * vid + 2] * inv_voxel_size.z)) - grid_min.z;
@@ -345,6 +365,9 @@ namespace o_voxel::fdg
             f.bmax = max3(v0, max3(v1, v2));
             face_desc[fid] = f;
 
+            // Start from the smallest octree node that contains the triangle's
+            // vertex leaf cells. The 3x3x3 neighbor seed around that root keeps
+            // conservative coverage when the triangle crosses nearby cells.
             int level;
             int root_i;
             int root_j;
@@ -417,16 +440,20 @@ namespace o_voxel::fdg
             node_box(d, level, i, j, k, grid_min, voxel_size, box_min, box_size, box_max);
             if (!triangle_box_hit(face_desc[fid], box_min, box_size, box_max))
             {
+                // Miss: no children and no leaf result.
                 child_count[idx] = 0;
                 result_count[idx] = 0;
             }
             else if (level < d)
             {
+                // Hit at an internal octree node: split into eight children for
+                // the next breadth-first refinement level.
                 child_count[idx] = 8;
                 result_count[idx] = 0;
             }
             else
             {
+                // Hit at leaf level: this face intersects this voxel.
                 child_count[idx] = 0;
                 result_count[idx] = 1;
             }
@@ -457,6 +484,8 @@ namespace o_voxel::fdg
                 const int64_t base = child_offsets[idx];
                 const int child_level = level + 1;
                 int slot = 0;
+                // child_offsets is the scan of child_count, so every surviving
+                // job writes its eight children into a disjoint range.
                 for (int bz = 0; bz < 2; ++bz)
                 {
                     for (int by = 0; by < 2; ++by)
@@ -476,6 +505,8 @@ namespace o_voxel::fdg
             else if (result_count[idx] != 0)
             {
                 const int64_t out = result_offsets[idx];
+                // result_offsets compacts leaf hits from this level into the
+                // chunk returned to the host loop.
                 result_prim[out] = prim_id;
                 result_voxels[3 * out + 0] = i;
                 result_voxels[3 * out + 1] = j;
@@ -498,12 +529,14 @@ namespace o_voxel::fdg
     } // namespace
 
     std::tuple<torch::Tensor, torch::Tensor>
-    voxelize_mesh_octree(
+    voxelize_mesh_octree_cuda(
         const torch::Tensor &vertices,
         const torch::Tensor &faces,
         const torch::Tensor &voxel_size,
         const torch::Tensor &grid_range)
     {
+        // Returns one row per primitive/voxel hit:
+        // prim_ids [K] int32 and voxels [K, 3] int32.
         TORCH_CHECK(vertices.is_cuda(), "vertices must be a CUDA tensor");
         TORCH_CHECK(faces.is_cuda(), "faces must be a CUDA tensor");
 
@@ -528,6 +561,8 @@ namespace o_voxel::fdg
         const Int3 grid_max{grid_range_ptr[3], grid_range_ptr[4], grid_range_ptr[5]};
         const Int3 grid_size{grid_max.x - grid_min.x, grid_max.y - grid_min.y, grid_max.z - grid_min.z};
         const int d = grid_depth(grid_size);
+        // d is the full leaf depth of the cubic octree that covers the grid.
+        // A leaf node corresponds to one voxel-sized cell.
         TORCH_CHECK(d <= 21, "grid depth exceeds 21");
 
         auto leaf_coords = torch::empty({num_vertices, 3}, opts_i32);
@@ -565,6 +600,9 @@ namespace o_voxel::fdg
 
         while (num_jobs > 0)
         {
+            // Breadth-first refinement. Each iteration classifies all current
+            // jobs in parallel, scans counts with CUB, then emits the next level
+            // jobs and any leaf hits.
             auto child_count = torch::empty({num_jobs}, opts_i64);
             auto result_count = torch::empty({num_jobs}, opts_i64);
             auto child_offsets = torch::empty({num_jobs}, opts_i64);
@@ -620,6 +658,8 @@ namespace o_voxel::fdg
         auto prim_ids = torch::empty({total_results}, opts_i32);
         auto voxels = torch::empty({total_results, 3}, opts_i32);
         int64_t cursor = 0;
+        // Leaf hits are produced level by level, so collect chunks first and
+        // concatenate once the total result count is known.
         for (size_t i = 0; i < chunk_sizes.size(); ++i)
         {
             const int64_t n = chunk_sizes[i];

@@ -1,23 +1,25 @@
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 from .. import _C
 
-FloatArrayLike = float | list[Any] | tuple[Any, ...] | np.ndarray | torch.Tensor
-IntArrayLike = int | list[Any] | tuple[Any, ...] | np.ndarray | torch.Tensor
-ArrayLike = list[Any] | tuple[Any, ...] | np.ndarray | torch.Tensor
-_EDGE_NEIGHBOR_VOXEL_OFFSET: dict[torch.device, torch.Tensor] = {}
-_QUAD_SPLIT_1: dict[torch.device, torch.Tensor] = {}
-_QUAD_SPLIT_2: dict[torch.device, torch.Tensor] = {}
-_QUAD_SPLIT_TRAIN: dict[torch.device, torch.Tensor] = {}
+FloatArrayLike = Union[float, List[Any], Tuple[Any, ...], np.ndarray, torch.Tensor]
+IntArrayLike = Union[int, List[Any], Tuple[Any, ...], np.ndarray, torch.Tensor]
+ArrayLike = Union[List[Any], Tuple[Any, ...], np.ndarray, torch.Tensor]
+_EDGE_NEIGHBOR_VOXEL_OFFSET: Dict[torch.device, torch.Tensor] = {}
+_QUAD_SPLIT_1: Dict[torch.device, torch.Tensor] = {}
+_QUAD_SPLIT_2: Dict[torch.device, torch.Tensor] = {}
+_QUAD_SPLIT_TRAIN: Dict[torch.device, torch.Tensor] = {}
 
 __all__ = [
     "mesh_to_flexible_dual_grid",
+    "intersect_occ",
     "flexible_dual_grid_to_mesh",
 ]
 
 
 def _init_hashmap(grid_size, capacity, device):
+    """Create the sparse voxel lookup table used when converting a dual grid to a mesh."""
     VOL = (grid_size[0] * grid_size[1] * grid_size[2]).item()
 
     # If the number of elements in the tensor is less than 2^32, use uint32 as the hashmap type, otherwise use uint64.
@@ -37,16 +39,22 @@ def _init_hashmap(grid_size, capacity, device):
 def mesh_to_flexible_dual_grid(
     vertices: torch.Tensor,
     faces: torch.Tensor,
-    voxel_size: FloatArrayLike | None = None,
-    grid_size: IntArrayLike | None = None,
-    aabb: ArrayLike | None = None,
+    voxel_size: Optional[FloatArrayLike] = None,
+    grid_size: Optional[IntArrayLike] = None,
+    aabb: Optional[ArrayLike] = None,
     face_weight: float = 1.0,
     boundary_weight: float = 1.0,
     regularization_weight: float = 0.1,
     timing: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Voxelize a mesh into a sparse voxel grid.
+    Convert a triangle mesh into a sparse flexible dual grid.
+
+    The mesh is first placed in a voxel grid, then intersection, face, and
+    boundary QEF terms are accumulated for the active voxels. The final dual
+    vertex in each voxel is found by solving the accumulated QEF. CUDA inputs use
+    the CUDA implementation; CPU inputs use the CPU implementation with the same
+    public semantics.
 
     Args:
         vertices (torch.Tensor): The vertices of the mesh.
@@ -141,7 +149,7 @@ def mesh_to_flexible_dual_grid(
         grid_size = ((aabb[1] - aabb[0]) / voxel_size).round().int()
     grid_size = grid_size.to(device=device, dtype=torch.int32).contiguous()
 
-    # subdivide mesh
+    # Shift mesh vertices into grid-local coordinates before calling C++/CUDA.
     vertices = vertices - aabb[0].reshape(1, 3)
     grid_range = torch.stack([torch.zeros_like(grid_size), grid_size], dim=0).to(dtype=torch.int32).contiguous()
 
@@ -170,18 +178,121 @@ def mesh_to_flexible_dual_grid(
     return ret
 
 
+@torch.no_grad()
+def intersect_occ(
+    vertices: torch.Tensor,
+    faces: torch.Tensor,
+    voxel_size: Optional[FloatArrayLike] = None,
+    grid_size: Optional[IntArrayLike] = None,
+    aabb: Optional[ArrayLike] = None,
+) -> torch.Tensor:
+    """
+    Return only the voxel coordinates intersected by a triangle mesh.
+
+    This uses the same grid setup as mesh_to_flexible_dual_grid, but stops after
+    the occupancy stage and does not compute QEFs or dual vertices. It is the
+    matching public API for users who only need occupied voxels.
+    """
+
+    assert isinstance(vertices, torch.Tensor), f"vertices must be a torch.Tensor, but got {type(vertices)}"
+    assert isinstance(faces, torch.Tensor), f"faces must be a torch.Tensor, but got {type(faces)}"
+    assert vertices.dim() == 2, f"vertices must be a 2D tensor, but got {vertices.shape}"
+    assert vertices.size(1) == 3, f"vertices must have 3 columns, but got {vertices.size(1)}"
+    assert faces.dim() == 2, f"faces must be a 2D tensor, but got {faces.shape}"
+    assert faces.size(1) == 3, f"faces must have 3 columns, but got {faces.size(1)}"
+    assert vertices.device == faces.device, "vertices and faces must be on the same device"
+    assert voxel_size is not None or grid_size is not None, "Either voxel_size or grid_size must be provided"
+
+    device = vertices.device
+    vertices = vertices.to(device=device, dtype=torch.float32).contiguous()
+    faces = faces.to(device=device, dtype=torch.int32).contiguous()
+
+    if voxel_size is not None:
+        if isinstance(voxel_size, float):
+            voxel_size = [voxel_size, voxel_size, voxel_size]
+        if isinstance(voxel_size, (list, tuple)):
+            voxel_size = np.array(voxel_size)
+        if isinstance(voxel_size, np.ndarray):
+            voxel_size = torch.tensor(voxel_size, dtype=torch.float32, device=device)
+        assert isinstance(voxel_size, torch.Tensor), f"voxel_size must be a float, list, tuple, np.ndarray, or torch.Tensor, but got {type(voxel_size)}"
+        voxel_size = voxel_size.to(device=device, dtype=torch.float32).contiguous()
+        assert voxel_size.dim() == 1, f"voxel_size must be a 1D tensor, but got {voxel_size.shape}"
+        assert voxel_size.size(0) == 3, f"voxel_size must have 3 elements, but got {voxel_size.size(0)}"
+
+    if grid_size is not None:
+        if isinstance(grid_size, int):
+            grid_size = [grid_size, grid_size, grid_size]
+        if isinstance(grid_size, (list, tuple)):
+            grid_size = np.array(grid_size)
+        if isinstance(grid_size, np.ndarray):
+            grid_size = torch.tensor(grid_size, dtype=torch.int32, device=device)
+        assert isinstance(grid_size, torch.Tensor), f"grid_size must be an int, list, tuple, np.ndarray, or torch.Tensor, but got {type(grid_size)}"
+        grid_size = grid_size.to(device=device, dtype=torch.int32).contiguous()
+        assert grid_size.dim() == 1, f"grid_size must be a 1D tensor, but got {grid_size.shape}"
+        assert grid_size.size(0) == 3, f"grid_size must have 3 elements, but got {grid_size.size(0)}"
+
+    if aabb is not None:
+        if isinstance(aabb, (list, tuple)):
+            aabb = np.array(aabb)
+        if isinstance(aabb, np.ndarray):
+            aabb = torch.tensor(aabb, dtype=torch.float32, device=device)
+        assert isinstance(aabb, torch.Tensor), f"aabb must be a list, tuple, np.ndarray, or torch.Tensor, but got {type(aabb)}"
+        aabb = aabb.to(device=device, dtype=torch.float32).contiguous()
+        assert aabb.dim() == 2, f"aabb must be a 2D tensor, but got {aabb.shape}"
+        assert aabb.size(0) == 2, f"aabb must have 2 rows, but got {aabb.size(0)}"
+        assert aabb.size(1) == 3, f"aabb must have 3 columns, but got {aabb.size(1)}"
+
+    if aabb is None:
+        min_xyz = vertices.min(dim=0).values
+        max_xyz = vertices.max(dim=0).values
+
+        if voxel_size is not None:
+            padding = torch.ceil((max_xyz - min_xyz) / voxel_size) * voxel_size - (max_xyz - min_xyz)
+            min_xyz -= padding * 0.5
+            max_xyz += padding * 0.5
+        if grid_size is not None:
+            padding = (max_xyz - min_xyz) / (grid_size - 1)
+            min_xyz -= padding * 0.5
+            max_xyz += padding * 0.5
+
+        aabb = torch.stack([min_xyz, max_xyz], dim=0).float().contiguous()
+
+    if voxel_size is None:
+        assert grid_size is not None
+        voxel_size = ((aabb[1] - aabb[0]) / grid_size).to(dtype=torch.float32).contiguous()
+    if grid_size is None:
+        assert voxel_size is not None
+        grid_size = ((aabb[1] - aabb[0]) / voxel_size).round().int()
+    grid_size = grid_size.to(device=device, dtype=torch.int32).contiguous()
+
+    vertices = vertices - aabb[0].reshape(1, 3)
+    grid_range = torch.stack([torch.zeros_like(grid_size), grid_size], dim=0).to(dtype=torch.int32).contiguous()
+    triangles = vertices[faces.to(dtype=torch.long)].contiguous()
+
+    if vertices.is_cuda:
+        return _C.intersect_occ_cuda(triangles, voxel_size, grid_range)
+    else:
+        return _C.intersect_occ_cpu(triangles, voxel_size, grid_range)
+
+
 def flexible_dual_grid_to_mesh(
     coords: torch.Tensor,
     dual_vertices: torch.Tensor,
     intersected_flag: torch.Tensor,
-    split_weight: torch.Tensor | None,
+    split_weight: Optional[torch.Tensor],
     aabb: ArrayLike,
-    voxel_size: FloatArrayLike | None = None,
-    grid_size: IntArrayLike | None = None,
+    voxel_size: Optional[FloatArrayLike] = None,
+    grid_size: Optional[IntArrayLike] = None,
     train: bool = False,
 ):
     """
-    Extract mesh from sparse voxel structures using flexible dual grid.
+    Extract a triangle mesh from sparse flexible dual grid outputs.
+
+    The function looks up neighboring active voxels around each intersected grid
+    edge, forms one quad from the four neighboring dual vertices, then splits
+    each quad into triangles. The sparse voxel lookup is built in PyTorch and the
+    returned vertices are moved back from grid-local coordinates into the input
+    AABB.
 
     Args:
         coords (torch.Tensor): The coordinates of the voxels.
