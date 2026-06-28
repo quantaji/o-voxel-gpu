@@ -20,6 +20,28 @@ namespace o_voxel::fdg
         int64_t intersect_chunk_triangles,
         int boundary_chunk_steps);
 
+    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+    mesh_to_flexible_dual_grid_ref(
+        const torch::Tensor &vertices,
+        const torch::Tensor &faces,
+        const torch::Tensor &voxel_size,
+        const torch::Tensor &grid_range,
+        float face_weight,
+        float boundary_weight,
+        float regularization_weight,
+        int64_t intersect_chunk_triangles);
+
+    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+    mesh_to_flexible_dual_grid(
+        const torch::Tensor &vertices,
+        const torch::Tensor &faces,
+        const torch::Tensor &voxel_size,
+        const torch::Tensor &grid_range,
+        float face_weight,
+        float boundary_weight,
+        float regularization_weight,
+        int64_t intersect_chunk_triangles);
+
     std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
     intersect_qef_old(
         const torch::Tensor &triangles,
@@ -27,7 +49,14 @@ namespace o_voxel::fdg
         const torch::Tensor &grid_range,
         int64_t chunk_triangles);
 
-    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+    std::tuple<
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor>
     intersect_qef_ref(
         const torch::Tensor &triangles,
         const torch::Tensor &voxel_size,
@@ -90,10 +119,8 @@ namespace o_voxel::fdg
         const torch::Tensor &voxel_size,
         const torch::Tensor &grid_range,
         const torch::Tensor &voxels,
-        const torch::Tensor &brick_hash_keys,
-        const torch::Tensor &brick_hash_vals,
-        const torch::Tensor &brick_bits,
-        const torch::Tensor &brick_base);
+        const torch::Tensor &hash_keys,
+        const torch::Tensor &hash_vals);
 
     torch::Tensor face_qef(
         const torch::Tensor &triangles,
@@ -120,10 +147,8 @@ namespace o_voxel::fdg
         const torch::Tensor &grid_range,
         float boundary_weight,
         const torch::Tensor &voxels,
-        const torch::Tensor &brick_hash_keys,
-        const torch::Tensor &brick_hash_vals,
-        const torch::Tensor &brick_bits,
-        const torch::Tensor &brick_base);
+        const torch::Tensor &hash_keys,
+        const torch::Tensor &hash_vals);
 
     torch::Tensor boundary_qef(
         const torch::Tensor &boundaries,

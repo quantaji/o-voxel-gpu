@@ -15,6 +15,9 @@ namespace o_voxel::fdg
     {
 
         constexpr int kThreads = 256;
+        constexpr uint64_t kEmptyKey = UINT64_MAX;
+        constexpr uint32_t kEmptyVal = UINT32_MAX;
+        constexpr uint32_t kOverflowVal = UINT32_MAX - 1u;
 
         __device__ __forceinline__ float ref_min(float a, float b)
         {
@@ -63,11 +66,55 @@ namespace o_voxel::fdg
             atomicAdd(dst + 9, q.q33);
         }
 
+        __device__ __forceinline__ int64_t lookup_voxel_row_ref(
+            int x,
+            int y,
+            int z,
+            GridSpec grid,
+            const uint64_t *__restrict__ hash_keys,
+            const uint32_t *__restrict__ hash_vals,
+            uint32_t capacity)
+        {
+            if (x < grid.grid_min.x || x >= grid.grid_max.x)
+                return -1;
+            if (y < grid.grid_min.y || y >= grid.grid_max.y)
+                return -1;
+            if (z < grid.grid_min.z || z >= grid.grid_max.z)
+                return -1;
+
+            const uint64_t key = pack_voxel_key(x, y, z, grid.grid_min, grid.grid_max);
+            uint64_t mixed = key;
+            mixed ^= mixed >> 33;
+            mixed *= 0xff51afd7ed558ccdULL;
+            mixed ^= mixed >> 33;
+            mixed *= 0xc4ceb9fe1a85ec53ULL;
+            mixed ^= mixed >> 33;
+
+            uint32_t slot = static_cast<uint32_t>(mixed % capacity);
+            for (uint32_t probe = 0; probe < capacity; ++probe)
+            {
+                const uint64_t found = hash_keys[slot];
+                if (found == kEmptyKey)
+                    return -1;
+                if (found == key)
+                {
+                    const uint32_t row = hash_vals[slot];
+                    if (row == kEmptyVal || row == kOverflowVal)
+                        return -1;
+                    return static_cast<int64_t>(row);
+                }
+                slot = (slot + 1u) % capacity;
+            }
+            return -1;
+        }
+
         __global__ void face_qef_ref_kernel(
             int64_t num_triangles,
             const float *__restrict__ triangles,
             GridSpec grid,
-            BrickLookup lookup,
+            const uint64_t *__restrict__ hash_keys,
+            const uint32_t *__restrict__ hash_vals,
+            uint32_t hash_capacity,
             float *__restrict__ out_qefs)
         {
             const int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -182,7 +229,7 @@ namespace o_voxel::fdg
                         if (n_zx_e2_x * pz + n_zx_e2_y * px + d_zx_e2 < 0.0f)
                             continue;
 
-                        const int64_t row = lookup_voxel_row_in_bricks(x, y, z, grid, lookup);
+                        const int64_t row = lookup_voxel_row_ref(x, y, z, grid, hash_keys, hash_vals, hash_capacity);
                         if (row >= 0)
                             atomic_add_qef(out_qefs + 10 * row, qef);
                     }
@@ -197,17 +244,13 @@ namespace o_voxel::fdg
         const torch::Tensor &voxel_size,
         const torch::Tensor &grid_range,
         const torch::Tensor &voxels,
-        const torch::Tensor &brick_hash_keys,
-        const torch::Tensor &brick_hash_vals,
-        const torch::Tensor &brick_bits,
-        const torch::Tensor &brick_base)
+        const torch::Tensor &hash_keys,
+        const torch::Tensor &hash_vals)
     {
         TORCH_CHECK(triangles.is_cuda(), "triangles must be a CUDA tensor");
         TORCH_CHECK(voxels.is_cuda(), "voxels must be a CUDA tensor");
-        TORCH_CHECK(brick_hash_keys.is_cuda(), "brick_hash_keys must be a CUDA tensor");
-        TORCH_CHECK(brick_hash_vals.is_cuda(), "brick_hash_vals must be a CUDA tensor");
-        TORCH_CHECK(brick_bits.is_cuda(), "brick_bits must be a CUDA tensor");
-        TORCH_CHECK(brick_base.is_cuda(), "brick_base must be a CUDA tensor");
+        TORCH_CHECK(hash_keys.is_cuda(), "hash_keys must be a CUDA tensor");
+        TORCH_CHECK(hash_vals.is_cuda(), "hash_vals must be a CUDA tensor");
         static_assert(sizeof(SymQEF10) == sizeof(float) * 10, "Unexpected SymQEF10 layout");
 
         const c10::cuda::CUDAGuard guard(triangles.device());
@@ -227,20 +270,15 @@ namespace o_voxel::fdg
             Int3{grid_range_ptr[0], grid_range_ptr[1], grid_range_ptr[2]},
             Int3{grid_range_ptr[3], grid_range_ptr[4], grid_range_ptr[5]},
         };
-        const BrickLookup lookup{
-            brick_hash_keys.data_ptr<uint64_t>(),
-            brick_hash_vals.data_ptr<uint32_t>(),
-            brick_bits.data_ptr<uint32_t>(),
-            brick_base.data_ptr<int64_t>(),
-            static_cast<uint64_t>(brick_hash_keys.numel()),
-        };
 
         const int blocks = static_cast<int>((num_triangles + kThreads - 1) / kThreads);
         face_qef_ref_kernel<<<blocks, kThreads, 0, stream>>>(
             num_triangles,
             triangles.data_ptr<float>(),
             grid,
-            lookup,
+            hash_keys.data_ptr<uint64_t>(),
+            hash_vals.data_ptr<uint32_t>(),
+            static_cast<uint32_t>(hash_keys.numel()),
             out_qefs.data_ptr<float>());
         C10_CUDA_KERNEL_LAUNCH_CHECK();
         return out_qefs;

@@ -297,7 +297,14 @@ namespace o_voxel::fdg
 
     } // namespace
 
-    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+    std::tuple<
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor>
     intersect_qef_ref(
         const torch::Tensor &triangles,
         const torch::Tensor &voxel_size,
@@ -322,8 +329,17 @@ namespace o_voxel::fdg
         auto empty_cnt = torch::empty({0}, opts_f32);
         auto empty_intersected = torch::empty({0, 3}, opts_bool);
         auto empty_qefs = torch::empty({0, 10}, opts_f32);
+        auto empty_hash_keys = torch::empty({0}, opts_u64);
+        auto empty_hash_vals = torch::empty({0}, opts_u32);
         if (num_triangles == 0)
-            return std::make_tuple(empty_voxels, empty_mean, empty_cnt, empty_intersected, empty_qefs);
+            return std::make_tuple(
+                empty_voxels,
+                empty_mean,
+                empty_cnt,
+                empty_intersected,
+                empty_qefs,
+                empty_hash_keys,
+                empty_hash_vals);
 
         const float *voxel_size_ptr = voxel_size.data_ptr<float>();
         const int32_t *grid_range_ptr = grid_range.data_ptr<int32_t>();
@@ -376,7 +392,14 @@ namespace o_voxel::fdg
         TORCH_CHECK(num_voxels_u32 <= static_cast<uint32_t>(max_voxels), "ref hash table exceeded estimated capacity");
         const int64_t num_voxels = static_cast<int64_t>(num_voxels_u32);
         if (num_voxels == 0)
-            return std::make_tuple(empty_voxels, empty_mean, empty_cnt, empty_intersected, empty_qefs);
+            return std::make_tuple(
+                empty_voxels,
+                empty_mean,
+                empty_cnt,
+                empty_intersected,
+                empty_qefs,
+                hash_keys,
+                hash_vals);
 
         blocks = static_cast<int>((num_voxels + kThreads - 1) / kThreads);
 
@@ -398,7 +421,7 @@ namespace o_voxel::fdg
             out_intersected.data_ptr<bool>(),
             out_qefs.data_ptr<float>());
         C10_CUDA_KERNEL_LAUNCH_CHECK();
-        return std::make_tuple(out_voxels, out_mean, out_cnt, out_intersected, out_qefs);
+        return std::make_tuple(out_voxels, out_mean, out_cnt, out_intersected, out_qefs, hash_keys, hash_vals);
     }
 
 } // namespace o_voxel::fdg

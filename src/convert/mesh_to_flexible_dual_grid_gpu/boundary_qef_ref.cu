@@ -16,6 +16,9 @@ namespace o_voxel::fdg
     {
 
         constexpr int kThreads = 256;
+        constexpr uint64_t kEmptyKey = UINT64_MAX;
+        constexpr uint32_t kEmptyVal = UINT32_MAX;
+        constexpr uint32_t kOverflowVal = UINT32_MAX - 1u;
 
         __device__ __forceinline__ uint64_t pack_edge_key(int32_t a, int32_t b)
         {
@@ -67,12 +70,56 @@ namespace o_voxel::fdg
             return SymQEF10{a00, a01, a02, b0, a11, a12, b1, a22, b2, c};
         }
 
+        __device__ __forceinline__ int64_t lookup_voxel_row_ref(
+            int x,
+            int y,
+            int z,
+            GridSpec grid,
+            const uint64_t *__restrict__ hash_keys,
+            const uint32_t *__restrict__ hash_vals,
+            uint32_t capacity)
+        {
+            if (x < grid.grid_min.x || x >= grid.grid_max.x)
+                return -1;
+            if (y < grid.grid_min.y || y >= grid.grid_max.y)
+                return -1;
+            if (z < grid.grid_min.z || z >= grid.grid_max.z)
+                return -1;
+
+            const uint64_t key = pack_voxel_key(x, y, z, grid.grid_min, grid.grid_max);
+            uint64_t mixed = key;
+            mixed ^= mixed >> 33;
+            mixed *= 0xff51afd7ed558ccdULL;
+            mixed ^= mixed >> 33;
+            mixed *= 0xc4ceb9fe1a85ec53ULL;
+            mixed ^= mixed >> 33;
+
+            uint32_t slot = static_cast<uint32_t>(mixed % capacity);
+            for (uint32_t probe = 0; probe < capacity; ++probe)
+            {
+                const uint64_t found = hash_keys[slot];
+                if (found == kEmptyKey)
+                    return -1;
+                if (found == key)
+                {
+                    const uint32_t row = hash_vals[slot];
+                    if (row == kEmptyVal || row == kOverflowVal)
+                        return -1;
+                    return static_cast<int64_t>(row);
+                }
+                slot = (slot + 1u) % capacity;
+            }
+            return -1;
+        }
+
         __device__ __forceinline__ void add_boundary_voxel_ref(
             int x,
             int y,
             int z,
             GridSpec grid,
-            BrickLookup lookup,
+            const uint64_t *__restrict__ hash_keys,
+            const uint32_t *__restrict__ hash_vals,
+            uint32_t hash_capacity,
             SymQEF10 qef,
             float boundary_weight,
             float *out_qefs)
@@ -84,7 +131,7 @@ namespace o_voxel::fdg
             if (z < grid.grid_min.z || z >= grid.grid_max.z)
                 return;
 
-            const int64_t row = lookup_voxel_row_in_bricks(x, y, z, grid, lookup);
+            const int64_t row = lookup_voxel_row_ref(x, y, z, grid, hash_keys, hash_vals, hash_capacity);
             if (row >= 0)
                 atomic_add_qef_scaled(out_qefs + 10 * row, qef, boundary_weight);
         }
@@ -128,7 +175,9 @@ namespace o_voxel::fdg
             const float *__restrict__ vertices,
             GridSpec grid,
             float boundary_weight,
-            BrickLookup lookup,
+            const uint64_t *__restrict__ hash_keys,
+            const uint32_t *__restrict__ hash_vals,
+            uint32_t hash_capacity,
             float *__restrict__ out_qefs)
         {
             const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -216,7 +265,10 @@ namespace o_voxel::fdg
                 tdelta_z = static_cast<double>(grid.voxel_size.z) / fabs(dir_z);
             }
 
-            add_boundary_voxel_ref(cur_x, cur_y, cur_z, grid, lookup, qef, boundary_weight, out_qefs);
+            add_boundary_voxel_ref(
+                cur_x, cur_y, cur_z,
+                grid, hash_keys, hash_vals, hash_capacity,
+                qef, boundary_weight, out_qefs);
 
             while (true)
             {
@@ -249,7 +301,10 @@ namespace o_voxel::fdg
                     tmax_z += tdelta_z;
                 }
 
-                add_boundary_voxel_ref(cur_x, cur_y, cur_z, grid, lookup, qef, boundary_weight, out_qefs);
+                add_boundary_voxel_ref(
+                    cur_x, cur_y, cur_z,
+                    grid, hash_keys, hash_vals, hash_capacity,
+                    qef, boundary_weight, out_qefs);
             }
         }
 
@@ -262,18 +317,14 @@ namespace o_voxel::fdg
         const torch::Tensor &grid_range,
         float boundary_weight,
         const torch::Tensor &voxels,
-        const torch::Tensor &brick_hash_keys,
-        const torch::Tensor &brick_hash_vals,
-        const torch::Tensor &brick_bits,
-        const torch::Tensor &brick_base)
+        const torch::Tensor &hash_keys,
+        const torch::Tensor &hash_vals)
     {
         TORCH_CHECK(vertices.is_cuda(), "vertices must be a CUDA tensor");
         TORCH_CHECK(faces.is_cuda(), "faces must be a CUDA tensor");
         TORCH_CHECK(voxels.is_cuda(), "voxels must be a CUDA tensor");
-        TORCH_CHECK(brick_hash_keys.is_cuda(), "brick_hash_keys must be a CUDA tensor");
-        TORCH_CHECK(brick_hash_vals.is_cuda(), "brick_hash_vals must be a CUDA tensor");
-        TORCH_CHECK(brick_bits.is_cuda(), "brick_bits must be a CUDA tensor");
-        TORCH_CHECK(brick_base.is_cuda(), "brick_base must be a CUDA tensor");
+        TORCH_CHECK(hash_keys.is_cuda(), "hash_keys must be a CUDA tensor");
+        TORCH_CHECK(hash_vals.is_cuda(), "hash_vals must be a CUDA tensor");
         static_assert(sizeof(SymQEF10) == sizeof(float) * 10, "Unexpected SymQEF10 layout");
 
         const c10::cuda::CUDAGuard guard(vertices.device());
@@ -334,13 +385,6 @@ namespace o_voxel::fdg
             Int3{grid_range_ptr[0], grid_range_ptr[1], grid_range_ptr[2]},
             Int3{grid_range_ptr[3], grid_range_ptr[4], grid_range_ptr[5]},
         };
-        const BrickLookup lookup{
-            brick_hash_keys.data_ptr<uint64_t>(),
-            brick_hash_vals.data_ptr<uint32_t>(),
-            brick_bits.data_ptr<uint32_t>(),
-            brick_base.data_ptr<int64_t>(),
-            static_cast<uint64_t>(brick_hash_keys.numel()),
-        };
 
         blocks = static_cast<int>((num_edges + kThreads - 1) / kThreads);
         accumulate_boundary_edges_ref_kernel<<<blocks, kThreads, 0, stream>>>(
@@ -350,7 +394,9 @@ namespace o_voxel::fdg
             vertices.data_ptr<float>(),
             grid,
             boundary_weight,
-            lookup,
+            hash_keys.data_ptr<uint64_t>(),
+            hash_vals.data_ptr<uint32_t>(),
+            static_cast<uint32_t>(hash_keys.numel()),
             out_qefs.data_ptr<float>());
         C10_CUDA_KERNEL_LAUNCH_CHECK();
         return out_qefs;
