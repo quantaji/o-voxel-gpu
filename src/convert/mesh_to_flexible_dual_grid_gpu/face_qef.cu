@@ -158,6 +158,7 @@ namespace o_voxel::fdg
             const float *__restrict__ triangles,
             GridSpec grid,
             BrickLookup lookup,
+            float face_weight,
             float *__restrict__ out_qefs)
         {
             const int64_t task_id = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -192,7 +193,9 @@ namespace o_voxel::fdg
             const float nx = n.x;
             const float ny = n.y;
             const float nz = n.z;
-            const SymQEF10 qef = qef_from_plane(make_float4(nx, ny, nz, -(nx * v0.x + ny * v0.y + nz * v0.z)));
+            const SymQEF10 qef = qef_scale(
+                qef_from_plane(make_float4(nx, ny, nz, -(nx * v0.x + ny * v0.y + nz * v0.z))),
+                face_weight);
 
             float min_x = v0.x < v1.x ? v0.x : v1.x;
             min_x = min_x < v2.x ? min_x : v2.x;
@@ -331,6 +334,8 @@ namespace o_voxel::fdg
         const torch::Tensor &voxel_size,
         const torch::Tensor &grid_range,
         const torch::Tensor &voxels,
+        const torch::Tensor &qefs,
+        float face_weight,
         const torch::Tensor &brick_hash_keys,
         const torch::Tensor &brick_hash_vals,
         const torch::Tensor &brick_bits,
@@ -342,12 +347,10 @@ namespace o_voxel::fdg
         const c10::cuda::CUDAGuard guard(triangles.device());
         const cudaStream_t stream = at::cuda::getCurrentCUDAStream(triangles.get_device()).stream();
         const torch::Device device = triangles.device();
-        const auto opts_f32 = torch::TensorOptions().dtype(torch::kFloat32).device(device);
         const int64_t num_triangles = triangles.size(0);
         const int64_t num_voxels = voxels.size(0);
-        auto out_qefs = torch::zeros({num_voxels, 10}, opts_f32);
         if (num_triangles == 0 || num_voxels == 0)
-            return out_qefs;
+            return qefs;
 
         const auto opts_i64 = torch::TensorOptions().dtype(torch::kInt64).device(device);
         const auto opts_i32 = torch::TensorOptions().dtype(torch::kInt32).device(device);
@@ -400,7 +403,7 @@ namespace o_voxel::fdg
         C10_CUDA_CHECK(cudaStreamSynchronize(stream));
         const int64_t num_tasks = tail[0] + tail[1];
         if (num_tasks == 0)
-            return out_qefs;
+            return qefs;
 
         auto tasks = torch::empty({num_tasks, 4}, opts_i32);
         emit_face_brick_tasks_kernel<<<blocks, kThreads, 0, stream>>>(
@@ -418,9 +421,10 @@ namespace o_voxel::fdg
             triangles.data_ptr<float>(),
             grid,
             lookup,
-            out_qefs.data_ptr<float>());
+            face_weight,
+            qefs.data_ptr<float>());
         C10_CUDA_KERNEL_LAUNCH_CHECK();
-        return out_qefs;
+        return qefs;
     }
 
 } // namespace o_voxel::fdg

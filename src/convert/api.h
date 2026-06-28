@@ -12,7 +12,6 @@
 #pragma once
 #include <torch/extension.h>
 
-
 /**
  * Extract flexible dual grid from a triangle mesh.
  *
@@ -28,20 +27,84 @@
  * @return a tuple ((x, y, z), vertices, intersected, faces) containing the remeshed vertices and the corresponding voxel grid.
  */
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> mesh_to_flexible_dual_grid_cpu(
-    const torch::Tensor& vertices,
-    const torch::Tensor& faces,
-    const torch::Tensor& voxel_size,
-    const torch::Tensor& grid_range,
+    const torch::Tensor &vertices,
+    const torch::Tensor &faces,
+    const torch::Tensor &voxel_size,
+    const torch::Tensor &grid_range,
     float face_weight,
     float boundary_weight,
     float regularization_weight,
-    bool timing
-);
+    bool timing);
 
+namespace o_voxel::fdg
+{
+
+    torch::Tensor intersect_occ(
+        const torch::Tensor &triangles,
+        const torch::Tensor &voxel_size,
+        const torch::Tensor &grid_range);
+
+    std::tuple<
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor,
+        torch::Tensor>
+    intersect_qef(
+        const torch::Tensor &triangles,
+        const torch::Tensor &voxel_size,
+        const torch::Tensor &grid_range);
+
+    torch::Tensor face_qef(
+        const torch::Tensor &triangles,
+        const torch::Tensor &voxel_size,
+        const torch::Tensor &grid_range,
+        const torch::Tensor &voxels,
+        const torch::Tensor &qefs,
+        float face_weight,
+        const torch::Tensor &brick_hash_keys,
+        const torch::Tensor &brick_hash_vals,
+        const torch::Tensor &brick_bits,
+        const torch::Tensor &brick_base);
+
+    torch::Tensor boundary_qef(
+        const torch::Tensor &boundaries,
+        const torch::Tensor &voxel_size,
+        const torch::Tensor &grid_range,
+        float boundary_weight,
+        const torch::Tensor &voxels,
+        const torch::Tensor &qefs,
+        const torch::Tensor &brick_hash_keys,
+        const torch::Tensor &brick_hash_vals,
+        const torch::Tensor &brick_bits,
+        const torch::Tensor &brick_base);
+
+    std::tuple<torch::Tensor, torch::Tensor>
+    voxelize_mesh_octree(
+        const torch::Tensor &vertices,
+        const torch::Tensor &faces,
+        const torch::Tensor &voxel_size,
+        const torch::Tensor &grid_range);
+
+    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+    mesh_to_flexible_dual_grid_cuda(
+        const torch::Tensor &vertices,
+        const torch::Tensor &faces,
+        const torch::Tensor &voxel_size,
+        const torch::Tensor &grid_range,
+        float face_weight,
+        float boundary_weight,
+        float regularization_weight);
+
+} // namespace o_voxel::fdg
 
 /**
  * Voxelizes a triangle mesh with PBR materials
- * 
+ *
  * @param voxel_size                    [3] tensor containing the size of a voxel
  * @param grid_range                    [6] tensor containing the size of the grid
  * @param vertices                      [N_tri, 3, 3] array containing the triangle vertices
@@ -74,7 +137,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> mesh_to_flexible_dual_gr
  * @param normalTextureFilter           list of int indicating the normal texture filter (0: NEAREST, 1: LINEAR)
  * @param normalTextureWrap             list of int indicating the normal texture wrap (0: REPEAT, 1: CLAMP_TO_EDGE, 2: MIRRORED_REPEAT)
  * @param mipLevelOffset                float indicating the mip level offset for texture mipmap
- * 
+ *
  * @return tuple containing:
  *   - coords: tensor of shape [N, 3] containing the voxel coordinates
  *   - out_baseColor: tensor of shape [N, 3] containing the base color of each voxel
@@ -86,37 +149,36 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> mesh_to_flexible_dual_gr
  */
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 textured_mesh_to_volumetric_attr_cpu(
-    const torch::Tensor& voxel_size,
-    const torch::Tensor& grid_range,
-    const torch::Tensor& vertices,
-    const torch::Tensor& normals,
-    const torch::Tensor& uvs,
-    const torch::Tensor& materialIds,
-    const std::vector<torch::Tensor>& baseColorFactor,
-    const std::vector<torch::Tensor>& baseColorTexture,
-    const std::vector<int>& baseColorTextureFilter,
-    const std::vector<int>& baseColorTextureWrap,
-    const std::vector<float>& metallicFactor,
-    const std::vector<torch::Tensor>& metallicTexture,
-    const std::vector<int>& metallicTextureFilter,
-    const std::vector<int>& metallicTextureWrap,
-    const std::vector<float>& roughnessFactor,
-    const std::vector<torch::Tensor>& roughnessTexture,
-    const std::vector<int>& roughnessTextureFilter,
-    const std::vector<int>& roughnessTextureWrap,
-    const std::vector<torch::Tensor>& emissiveFactor,
-    const std::vector<torch::Tensor>& emissiveTexture,
-    const std::vector<int>& emissiveTextureFilter,
-    const std::vector<int>& emissiveTextureWrap,
-    const std::vector<int>& alphaMode,
-    const std::vector<float>& alphaCutoff,
-    const std::vector<float>& alphaFactor,
-    const std::vector<torch::Tensor>& alphaTexture,
-    const std::vector<int>& alphaTextureFilter,
-    const std::vector<int>& alphaTextureWrap,
-    const std::vector<torch::Tensor>& normalTexture,
-    const std::vector<int>& normalTextureFilter,
-    const std::vector<int>& normalTextureWrap,
+    const torch::Tensor &voxel_size,
+    const torch::Tensor &grid_range,
+    const torch::Tensor &vertices,
+    const torch::Tensor &normals,
+    const torch::Tensor &uvs,
+    const torch::Tensor &materialIds,
+    const std::vector<torch::Tensor> &baseColorFactor,
+    const std::vector<torch::Tensor> &baseColorTexture,
+    const std::vector<int> &baseColorTextureFilter,
+    const std::vector<int> &baseColorTextureWrap,
+    const std::vector<float> &metallicFactor,
+    const std::vector<torch::Tensor> &metallicTexture,
+    const std::vector<int> &metallicTextureFilter,
+    const std::vector<int> &metallicTextureWrap,
+    const std::vector<float> &roughnessFactor,
+    const std::vector<torch::Tensor> &roughnessTexture,
+    const std::vector<int> &roughnessTextureFilter,
+    const std::vector<int> &roughnessTextureWrap,
+    const std::vector<torch::Tensor> &emissiveFactor,
+    const std::vector<torch::Tensor> &emissiveTexture,
+    const std::vector<int> &emissiveTextureFilter,
+    const std::vector<int> &emissiveTextureWrap,
+    const std::vector<int> &alphaMode,
+    const std::vector<float> &alphaCutoff,
+    const std::vector<float> &alphaFactor,
+    const std::vector<torch::Tensor> &alphaTexture,
+    const std::vector<int> &alphaTextureFilter,
+    const std::vector<int> &alphaTextureWrap,
+    const std::vector<torch::Tensor> &normalTexture,
+    const std::vector<int> &normalTextureFilter,
+    const std::vector<int> &normalTextureWrap,
     const float mipLevelOffset,
-    const bool timing
-);
+    const bool timing);

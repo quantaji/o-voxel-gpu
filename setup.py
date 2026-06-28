@@ -25,9 +25,9 @@ else:
 setup(
     name="o_voxel",
     packages=[
-        'o_voxel',
-        'o_voxel.convert',
-        'o_voxel.io',
+        "o_voxel",
+        "o_voxel.convert",
+        "o_voxel.io",
     ],
     ext_modules=[
         CUDAExtension(
@@ -38,6 +38,11 @@ setup(
                 # Convert functions
                 "src/convert/flexible_dual_grid.cpp",
                 "src/convert/volumetic_attr.cpp",
+                "src/convert/mesh_to_flexible_dual_grid_gpu/intersect_qef.cu",
+                "src/convert/mesh_to_flexible_dual_grid_gpu/face_qef.cu",
+                "src/convert/mesh_to_flexible_dual_grid_gpu/boundary_qef.cu",
+                "src/convert/mesh_to_flexible_dual_grid_gpu/mesh_to_flexible_dual_grid.cu",
+                "src/convert/mesh_to_flexible_dual_grid_gpu/voxelize_mesh_octree.cu",
                 ## Serialization functions
                 "src/serialize/api.cu",
                 "src/serialize/hilbert.cu",
@@ -48,7 +53,6 @@ setup(
                 "src/io/filter_neighbor.cpp",
                 # Rasterization functions
                 "src/rasterize/rasterize.cu",
-                
                 # main
                 "src/ext.cpp",
             ],
@@ -57,11 +61,12 @@ setup(
             ],
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17"],
-                "nvcc": ["-O3","-std=c++17"] + cc_flag,
-            }
+                "nvcc": ["-O3", "-std=c++17"] + cc_flag,
+            },
         )
     ],
-    cmdclass={
-        'build_ext': BuildExtension
-    }
+    package_data={
+        "o_voxel": ["_C.pyi"],
+    },
+    cmdclass={"build_ext": BuildExtension},
 )

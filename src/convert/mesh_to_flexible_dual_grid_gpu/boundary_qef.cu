@@ -261,6 +261,7 @@ namespace o_voxel::fdg
         const torch::Tensor &grid_range,
         float boundary_weight,
         const torch::Tensor &voxels,
+        const torch::Tensor &qefs,
         const torch::Tensor &brick_hash_keys,
         const torch::Tensor &brick_hash_vals,
         const torch::Tensor &brick_bits,
@@ -272,13 +273,10 @@ namespace o_voxel::fdg
 
         const c10::cuda::CUDAGuard guard(boundaries.device());
         const cudaStream_t stream = at::cuda::getCurrentCUDAStream(boundaries.get_device()).stream();
-        const torch::Device device = boundaries.device();
-        const auto opts_f32 = torch::TensorOptions().dtype(torch::kFloat32).device(device);
         const int64_t num_boundaries = boundaries.size(0);
         const int64_t num_voxels = voxels.size(0);
-        auto out_qefs = torch::zeros({num_voxels, 10}, opts_f32);
         if (num_boundaries == 0 || num_voxels == 0 || boundary_weight <= 0.0f)
-            return out_qefs;
+            return qefs;
 
         const float *voxel_size_ptr = voxel_size.data_ptr<float>();
         const int32_t *grid_range_ptr = grid_range.data_ptr<int32_t>();
@@ -302,9 +300,9 @@ namespace o_voxel::fdg
             grid,
             boundary_weight,
             lookup,
-            out_qefs.data_ptr<float>());
+            qefs.data_ptr<float>());
         C10_CUDA_KERNEL_LAUNCH_CHECK();
-        return out_qefs;
+        return qefs;
     }
 
 } // namespace o_voxel::fdg

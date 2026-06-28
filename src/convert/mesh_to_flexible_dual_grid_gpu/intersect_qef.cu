@@ -822,11 +822,9 @@ namespace o_voxel::fdg
     torch::Tensor intersect_occ(
         const torch::Tensor &triangles,
         const torch::Tensor &voxel_size,
-        const torch::Tensor &grid_range,
-        int64_t chunk_triangles)
+        const torch::Tensor &grid_range)
     {
         TORCH_CHECK(triangles.is_cuda(), "triangles must be a CUDA tensor");
-        TORCH_CHECK(chunk_triangles > 0, "chunk_triangles must be positive");
 
         const c10::cuda::CUDAGuard guard(triangles.device());
         const cudaStream_t stream = at::cuda::getCurrentCUDAStream(triangles.get_device()).stream();
@@ -854,11 +852,9 @@ namespace o_voxel::fdg
     intersect_qef(
         const torch::Tensor &triangles,
         const torch::Tensor &voxel_size,
-        const torch::Tensor &grid_range,
-        int64_t chunk_triangles)
+        const torch::Tensor &grid_range)
     {
         TORCH_CHECK(triangles.is_cuda(), "triangles must be a CUDA tensor");
-        TORCH_CHECK(chunk_triangles > 0, "chunk_triangles must be positive");
 
         const c10::cuda::CUDAGuard guard(triangles.device());
         const cudaStream_t stream = at::cuda::getCurrentCUDAStream(triangles.get_device()).stream();

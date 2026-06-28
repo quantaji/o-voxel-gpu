@@ -613,20 +613,6 @@ namespace o_voxel::fdg
             boundaries[6 * static_cast<int64_t>(out) + 5] = vertices[3 * static_cast<int64_t>(v1) + 2];
         }
 
-        __global__ void add_qefs_kernel(
-            const SymQEF10 *__restrict__ intersect_qefs,
-            const SymQEF10 *__restrict__ face_qefs,
-            const SymQEF10 *__restrict__ boundary_qefs,
-            int64_t n,
-            float face_weight,
-            SymQEF10 *__restrict__ total_qefs)
-        {
-            const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-            if (i >= n)
-                return;
-            total_qefs[i] = qef_add(intersect_qefs[i], qef_add(qef_scale(face_qefs[i], face_weight), boundary_qefs[i]));
-        }
-
         __global__ void solve_qef_kernel(
             const int32_t *__restrict__ voxels,
             const float *__restrict__ mean_sum,
@@ -756,19 +742,17 @@ namespace o_voxel::fdg
     } // namespace
 
     std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
-    mesh_to_flexible_dual_grid(
+    mesh_to_flexible_dual_grid_cuda(
         const torch::Tensor &vertices,
         const torch::Tensor &faces,
         const torch::Tensor &voxel_size,
         const torch::Tensor &grid_range,
         float face_weight,
         float boundary_weight,
-        float regularization_weight,
-        int64_t intersect_chunk_triangles)
+        float regularization_weight)
     {
         TORCH_CHECK(vertices.is_cuda(), "vertices must be a CUDA tensor");
         TORCH_CHECK(faces.is_cuda(), "faces must be a CUDA tensor");
-        TORCH_CHECK(intersect_chunk_triangles > 0, "intersect_chunk_triangles must be positive");
         static_assert(sizeof(SymQEF10) == sizeof(float) * 10, "Unexpected SymQEF10 layout");
 
         const c10::cuda::CUDAGuard guard(vertices.device());
@@ -789,12 +773,12 @@ namespace o_voxel::fdg
             C10_CUDA_KERNEL_LAUNCH_CHECK();
         }
 
-        auto intersect = intersect_qef(triangles, voxel_size, grid_range, intersect_chunk_triangles);
+        auto intersect = intersect_qef(triangles, voxel_size, grid_range);
         torch::Tensor voxels = std::get<0>(intersect);
         torch::Tensor mean_sum = std::get<1>(intersect);
         torch::Tensor cnt = std::get<2>(intersect);
         torch::Tensor intersected = std::get<3>(intersect);
-        torch::Tensor intersect_qefs = std::get<4>(intersect);
+        torch::Tensor total_qefs = std::get<4>(intersect);
         torch::Tensor brick_hash_keys = std::get<5>(intersect);
         torch::Tensor brick_hash_vals = std::get<6>(intersect);
         torch::Tensor brick_bits = std::get<7>(intersect);
@@ -807,46 +791,37 @@ namespace o_voxel::fdg
             return std::make_tuple(voxels, dual_vertices, intersected);
         }
 
-        torch::Tensor face_qefs = face_weight > 0.0f
-                                      ? face_qef(
-                                            triangles,
-                                            voxel_size,
-                                            grid_range,
-                                            voxels,
-                                            brick_hash_keys,
-                                            brick_hash_vals,
-                                            brick_bits,
-                                            brick_base)
-                                      : torch::zeros({num_voxels, 10}, opts_f32);
+        if (face_weight > 0.0f)
+            face_qef(
+                triangles,
+                voxel_size,
+                grid_range,
+                voxels,
+                total_qefs,
+                face_weight,
+                brick_hash_keys,
+                brick_hash_vals,
+                brick_bits,
+                brick_base);
 
-        torch::Tensor boundary_qefs = torch::zeros({num_voxels, 10}, opts_f32);
         if (boundary_weight > 0.0f)
         {
             torch::Tensor boundaries = extract_boundaries_cuda(vertices, faces);
             if (boundaries.size(0) > 0)
-                boundary_qefs = boundary_qef(
+                boundary_qef(
                     boundaries,
                     voxel_size,
                     grid_range,
                     boundary_weight,
                     voxels,
+                    total_qefs,
                     brick_hash_keys,
                     brick_hash_vals,
                     brick_bits,
                     brick_base);
         }
 
-        auto total_qefs = torch::empty({num_voxels, 10}, opts_f32);
         int blocks = static_cast<int>(div_up_i64(num_voxels, kThreads));
-        add_qefs_kernel<<<blocks, kThreads, 0, stream>>>(
-            reinterpret_cast<const SymQEF10 *>(intersect_qefs.data_ptr<float>()),
-            reinterpret_cast<const SymQEF10 *>(face_qefs.data_ptr<float>()),
-            reinterpret_cast<const SymQEF10 *>(boundary_qefs.data_ptr<float>()),
-            num_voxels,
-            face_weight,
-            reinterpret_cast<SymQEF10 *>(total_qefs.data_ptr<float>()));
-        C10_CUDA_KERNEL_LAUNCH_CHECK();
-
         const float *voxel_size_ptr = voxel_size.data_ptr<float>();
         const float3 voxel_size_h = make_float3(voxel_size_ptr[0], voxel_size_ptr[1], voxel_size_ptr[2]);
         auto dual_vertices = torch::empty({num_voxels, 3}, opts_f32);
