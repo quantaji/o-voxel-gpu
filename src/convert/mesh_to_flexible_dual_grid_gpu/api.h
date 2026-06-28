@@ -113,4 +113,27 @@ namespace o_voxel::fdg
         const torch::Tensor &voxels,
         int chunk_steps);
 
+    torch::Tensor boundary_qef_ref(
+        const torch::Tensor &vertices,
+        const torch::Tensor &faces,
+        const torch::Tensor &voxel_size,
+        const torch::Tensor &grid_range,
+        float boundary_weight,
+        const torch::Tensor &voxels,
+        const torch::Tensor &brick_hash_keys,
+        const torch::Tensor &brick_hash_vals,
+        const torch::Tensor &brick_bits,
+        const torch::Tensor &brick_base);
+
+    torch::Tensor boundary_qef(
+        const torch::Tensor &boundaries,
+        const torch::Tensor &voxel_size,
+        const torch::Tensor &grid_range,
+        float boundary_weight,
+        const torch::Tensor &voxels,
+        const torch::Tensor &brick_hash_keys,
+        const torch::Tensor &brick_hash_vals,
+        const torch::Tensor &brick_bits,
+        const torch::Tensor &brick_base);
+
 } // namespace o_voxel::fdg
