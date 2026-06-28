@@ -4,6 +4,7 @@ import os
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 BUILD_TARGET = os.environ.get("BUILD_TARGET", "auto")
+OVOXEL_VERSION = os.environ.get("OVOXEL_VERSION", "0.0.1")
 
 if BUILD_TARGET == "auto":
     if IS_HIP_EXTENSION:
@@ -24,6 +25,7 @@ else:
 
 setup(
     name="o_voxel",
+    version=OVOXEL_VERSION,
     python_requires=">=3.8",
     packages=[
         "o_voxel",

@@ -157,6 +157,7 @@ TORCH_CUDA_TAG="$(torch_cuda_tag "$CUDA_VERSION")"
 PYTHON_TAG="$(python_cp_tag "$PYTHON_VERSION")"
 TORCH_INDEX_URL="https://download.pytorch.org/whl/$TORCH_CUDA_TAG"
 DOCKER_IMAGE="$(docker_image_for_cuda "$CUDA_VERSION")"
+OVOXEL_VERSION="0.0.1+torch${TORCH_VERSION}.${TORCH_CUDA_TAG}"
 if [[ -z "$ARCH_LIST" ]]; then
     ARCH_LIST="$(default_arch_list_for_cuda "$CUDA_VERSION")"
 fi
@@ -182,6 +183,7 @@ echo "Docker image:    $DOCKER_IMAGE"
 echo "Python:          $PYTHON_VERSION"
 echo "PyTorch:         $TORCH_VERSION"
 echo "CUDA:            $CUDA_VERSION ($TORCH_CUDA_TAG)"
+echo "o_voxel version: $OVOXEL_VERSION"
 echo "Torch index:     $TORCH_INDEX_URL"
 echo "CUDA arch list:  $ARCH_LIST"
 
@@ -193,6 +195,7 @@ docker run --rm -i \
     -e PYTHON_VERSION="$PYTHON_VERSION" \
     -e TORCH_VERSION="$TORCH_VERSION" \
     -e CUDA_VERSION="$CUDA_VERSION" \
+    -e OVOXEL_VERSION="$OVOXEL_VERSION" \
     -e TORCH_INDEX_URL="$TORCH_INDEX_URL" \
     -e TORCH_CUDA_ARCH_LIST="$ARCH_LIST" \
     "$DOCKER_IMAGE" \

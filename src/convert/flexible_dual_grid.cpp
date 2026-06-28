@@ -604,17 +604,23 @@ void face_from_dual_vertices(
 
 torch::Tensor intersect_occ_cpu(
     const torch::Tensor &triangles,
-    const torch::Tensor &voxel_size,
-    const torch::Tensor &grid_range)
+    const std::vector<float> &voxel_size,
+    const std::vector<int64_t> &grid_range)
 {
+    TORCH_CHECK(!triangles.is_cuda(), "triangles must be a CPU tensor");
+
     const int64_t N_tri = triangles.size(0);
     const float *t_ptr = triangles.data_ptr<float>();
-    const float *voxel_size_ptr = voxel_size.data_ptr<float>();
-    const int *grid_range_ptr = grid_range.data_ptr<int>();
 
-    Eigen::Vector3f e_voxel_size(voxel_size_ptr[0], voxel_size_ptr[1], voxel_size_ptr[2]);
-    Eigen::Vector3i e_grid_min(grid_range_ptr[0], grid_range_ptr[1], grid_range_ptr[2]);
-    Eigen::Vector3i e_grid_max(grid_range_ptr[3], grid_range_ptr[4], grid_range_ptr[5]);
+    Eigen::Vector3f e_voxel_size(voxel_size[0], voxel_size[1], voxel_size[2]);
+    Eigen::Vector3i e_grid_min(
+        static_cast<int>(grid_range[0]),
+        static_cast<int>(grid_range[1]),
+        static_cast<int>(grid_range[2]));
+    Eigen::Vector3i e_grid_max(
+        static_cast<int>(grid_range[3]),
+        static_cast<int>(grid_range[4]),
+        static_cast<int>(grid_range[5]));
 
     std::vector<Eigen::Vector3f> e_triangles;
     e_triangles.reserve(N_tri * 3);
@@ -642,8 +648,8 @@ torch::Tensor intersect_occ_cpu(
  *
  * @param vertices: Tensor of shape (N, 3) containing vertex positions.
  * @param faces: Tensor of shape (M, 3) containing triangle vertex indices.
- * @param voxel_size: Tensor of shape (3,) containing the voxel size in each dimension.
- * @param grid_range: Tensor of shape (2, 3) containing the minimum and maximum coordinates of the grid range.
+ * @param voxel_size: Host vector of length 3 containing the voxel size in each dimension.
+ * @param grid_range: Host vector of length 6 containing the minimum and maximum coordinates of the grid range.
  * @param face_weight: Weight for the face edges in the QEF computation.
  * @param boundary_weight: Weight for the boundary edges in the QEF computation.
  * @param regularization_weight: Regularization factor to apply to the QEF matrices.
@@ -654,18 +660,19 @@ torch::Tensor intersect_occ_cpu(
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> mesh_to_flexible_dual_grid_cpu(
     const torch::Tensor &vertices,
     const torch::Tensor &faces,
-    const torch::Tensor &voxel_size,
-    const torch::Tensor &grid_range,
+    const std::vector<float> &voxel_size,
+    const std::vector<int64_t> &grid_range,
     float face_weight,
     float boundary_weight,
     float regularization_weight,
     bool timing)
 {
+    TORCH_CHECK(!vertices.is_cuda(), "vertices must be a CPU tensor");
+    TORCH_CHECK(!faces.is_cuda(), "faces must be a CPU tensor");
+
     const int F = faces.size(0);
     const float *v_ptr = vertices.data_ptr<float>();
     const int *f_ptr = faces.data_ptr<int>();
-    const float *voxel_size_ptr = voxel_size.data_ptr<float>();
-    const int *grid_range_ptr = grid_range.data_ptr<int>();
     clock_t start, end;
     std::unordered_map<VoxelCoord, size_t> hash_table;
     std::vector<int3> voxels;           // Voxel coordinates
@@ -675,9 +682,15 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> mesh_to_flexible_dual_gr
     std::vector<Eigen::Matrix4f> qefs;  // QEF matrices for each voxel
 
     // Convert tensors to Eigen types
-    Eigen::Vector3f e_voxel_size(voxel_size_ptr[0], voxel_size_ptr[1], voxel_size_ptr[2]);
-    Eigen::Vector3i e_grid_min(grid_range_ptr[0], grid_range_ptr[1], grid_range_ptr[2]);
-    Eigen::Vector3i e_grid_max(grid_range_ptr[3], grid_range_ptr[4], grid_range_ptr[5]);
+    Eigen::Vector3f e_voxel_size(voxel_size[0], voxel_size[1], voxel_size[2]);
+    Eigen::Vector3i e_grid_min(
+        static_cast<int>(grid_range[0]),
+        static_cast<int>(grid_range[1]),
+        static_cast<int>(grid_range[2]));
+    Eigen::Vector3i e_grid_max(
+        static_cast<int>(grid_range[3]),
+        static_cast<int>(grid_range[4]),
+        static_cast<int>(grid_range[5]));
 
     // Intersect QEF computation
     start = clock();

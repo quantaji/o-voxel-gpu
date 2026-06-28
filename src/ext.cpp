@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <pybind11/stl.h>
 #include "hash/api.h"
 #include "convert/api.h"
 #include "io/api.h"

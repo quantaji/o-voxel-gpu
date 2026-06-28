@@ -895,8 +895,8 @@ namespace o_voxel::fdg
 
     torch::Tensor intersect_occ_cuda(
         const torch::Tensor &triangles,
-        const torch::Tensor &voxel_size,
-        const torch::Tensor &grid_range)
+        const std::vector<float> &voxel_size,
+        const std::vector<int64_t> &grid_range)
     {
         // Same occupancy construction as intersect_qef_cuda, but no QEF,
         // mean/cnt, or intersected mask work is performed.
@@ -905,12 +905,16 @@ namespace o_voxel::fdg
         const c10::cuda::CUDAGuard guard(triangles.device());
         const cudaStream_t stream = at::cuda::getCurrentCUDAStream(triangles.get_device()).stream();
         const torch::Device device = triangles.device();
-        const float *voxel_size_ptr = voxel_size.data_ptr<float>();
-        const int32_t *grid_range_ptr = grid_range.data_ptr<int32_t>();
         const GridSpec grid{
-            float3{voxel_size_ptr[0], voxel_size_ptr[1], voxel_size_ptr[2]},
-            Int3{grid_range_ptr[0], grid_range_ptr[1], grid_range_ptr[2]},
-            Int3{grid_range_ptr[3], grid_range_ptr[4], grid_range_ptr[5]},
+            float3{voxel_size[0], voxel_size[1], voxel_size[2]},
+            Int3{
+                static_cast<int32_t>(grid_range[0]),
+                static_cast<int32_t>(grid_range[1]),
+                static_cast<int32_t>(grid_range[2])},
+            Int3{
+                static_cast<int32_t>(grid_range[3]),
+                static_cast<int32_t>(grid_range[4]),
+                static_cast<int32_t>(grid_range[5])},
         };
         return build_intersection_occupancy(triangles, grid, device, stream).voxels;
     }
@@ -927,8 +931,8 @@ namespace o_voxel::fdg
         torch::Tensor>
     intersect_qef_cuda(
         const torch::Tensor &triangles,
-        const torch::Tensor &voxel_size,
-        const torch::Tensor &grid_range)
+        const std::vector<float> &voxel_size,
+        const std::vector<int64_t> &grid_range)
     {
         // Start from the shared occupancy pass, then accumulate the intersection
         // planes and per-axis flags needed by the full flexible dual grid solve.
@@ -940,12 +944,16 @@ namespace o_voxel::fdg
         const auto opts_f32 = torch::TensorOptions().dtype(torch::kFloat32).device(device);
         const auto opts_bool = torch::TensorOptions().dtype(torch::kBool).device(device);
         const auto opts_u32 = torch::TensorOptions().dtype(torch::kUInt32).device(device);
-        const float *voxel_size_ptr = voxel_size.data_ptr<float>();
-        const int32_t *grid_range_ptr = grid_range.data_ptr<int32_t>();
         const GridSpec grid{
-            float3{voxel_size_ptr[0], voxel_size_ptr[1], voxel_size_ptr[2]},
-            Int3{grid_range_ptr[0], grid_range_ptr[1], grid_range_ptr[2]},
-            Int3{grid_range_ptr[3], grid_range_ptr[4], grid_range_ptr[5]},
+            float3{voxel_size[0], voxel_size[1], voxel_size[2]},
+            Int3{
+                static_cast<int32_t>(grid_range[0]),
+                static_cast<int32_t>(grid_range[1]),
+                static_cast<int32_t>(grid_range[2])},
+            Int3{
+                static_cast<int32_t>(grid_range[3]),
+                static_cast<int32_t>(grid_range[4]),
+                static_cast<int32_t>(grid_range[5])},
         };
 
         IntersectionOccupancy occ = build_intersection_occupancy(triangles, grid, device, stream);

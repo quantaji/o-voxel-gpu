@@ -798,8 +798,8 @@ namespace o_voxel::fdg
     mesh_to_flexible_dual_grid_cuda(
         const torch::Tensor &vertices,
         const torch::Tensor &faces,
-        const torch::Tensor &voxel_size,
-        const torch::Tensor &grid_range,
+        const std::vector<float> &voxel_size,
+        const std::vector<int64_t> &grid_range,
         float face_weight,
         float boundary_weight,
         float regularization_weight)
@@ -878,8 +878,7 @@ namespace o_voxel::fdg
         }
 
         int blocks = static_cast<int>(div_up_i64(num_voxels, kThreads));
-        const float *voxel_size_ptr = voxel_size.data_ptr<float>();
-        const float3 voxel_size_h = make_float3(voxel_size_ptr[0], voxel_size_ptr[1], voxel_size_ptr[2]);
+        const float3 voxel_size_h = make_float3(voxel_size[0], voxel_size[1], voxel_size[2]);
         auto dual_vertices = torch::empty({num_voxels, 3}, opts_f32);
         solve_qef_kernel<<<blocks, kThreads, 0, stream>>>(
             voxels.data_ptr<int32_t>(),

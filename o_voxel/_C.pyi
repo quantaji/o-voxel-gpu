@@ -1,4 +1,4 @@
-from typing import Any, Tuple
+from typing import Any, List, Tuple
 
 import torch
 
@@ -10,8 +10,8 @@ def hashmap_insert_3d_idx_as_val_cuda(*args: Any, **kwargs: Any) -> Any: ...
 def mesh_to_flexible_dual_grid_cpu(
     vertices: torch.Tensor,
     faces: torch.Tensor,
-    voxel_size: torch.Tensor,
-    grid_range: torch.Tensor,
+    voxel_size: List[float],
+    grid_range: List[int],
     face_weight: float,
     boundary_weight: float,
     regularization_weight: float,
@@ -20,21 +20,21 @@ def mesh_to_flexible_dual_grid_cpu(
 def mesh_to_flexible_dual_grid_cuda(
     vertices: torch.Tensor,
     faces: torch.Tensor,
-    voxel_size: torch.Tensor,
-    grid_range: torch.Tensor,
+    voxel_size: List[float],
+    grid_range: List[int],
     face_weight: float,
     boundary_weight: float,
     regularization_weight: float,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 def intersect_occ_cpu(
     triangles: torch.Tensor,
-    voxel_size: torch.Tensor,
-    grid_range: torch.Tensor,
+    voxel_size: List[float],
+    grid_range: List[int],
 ) -> torch.Tensor: ...
 def intersect_occ_cuda(
     triangles: torch.Tensor,
-    voxel_size: torch.Tensor,
-    grid_range: torch.Tensor,
+    voxel_size: List[float],
+    grid_range: List[int],
 ) -> torch.Tensor: ...
 def textured_mesh_to_volumetric_attr_cpu(*args: Any, **kwargs: Any) -> Tuple[torch.Tensor, ...]: ...
 def z_order_encode_cpu(x: torch.Tensor, y: torch.Tensor, z: torch.Tensor) -> torch.Tensor: ...

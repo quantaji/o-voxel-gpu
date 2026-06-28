@@ -88,6 +88,9 @@ def mesh_to_flexible_dual_grid(
     device = vertices.device
     vertices = vertices.to(device=device, dtype=torch.float32).contiguous()
     faces = faces.to(device=device, dtype=torch.int32).contiguous()
+    voxel_size_cpu = None
+    grid_size_cpu = None
+    aabb_cpu = None
 
     if voxel_size is not None:
         if isinstance(voxel_size, float):
@@ -95,9 +98,14 @@ def mesh_to_flexible_dual_grid(
         if isinstance(voxel_size, (list, tuple)):
             voxel_size = np.array(voxel_size)
         if isinstance(voxel_size, np.ndarray):
-            voxel_size = torch.tensor(voxel_size, dtype=torch.float32, device=device)
+            voxel_size_cpu = torch.tensor(voxel_size, dtype=torch.float32)
+            voxel_size = voxel_size_cpu
+        else:
+            assert isinstance(voxel_size, torch.Tensor), f"voxel_size must be a float, list, tuple, np.ndarray, or torch.Tensor, but got {type(voxel_size)}"
+            assert not voxel_size.is_cuda, "voxel_size Tensor metadata must be on CPU; pass Python values to avoid implicit CUDA sync"
+            voxel_size_cpu = voxel_size.to(dtype=torch.float32).contiguous()
         assert isinstance(voxel_size, torch.Tensor), f"voxel_size must be a float, list, tuple, np.ndarray, or torch.Tensor, but got {type(voxel_size)}"
-        voxel_size = voxel_size.to(device=device, dtype=torch.float32).contiguous()
+        voxel_size = voxel_size_cpu.to(device=device).contiguous()
         assert voxel_size.dim() == 1, f"voxel_size must be a 1D tensor, but got {voxel_size.shape}"
         assert voxel_size.size(0) == 3, f"voxel_size must have 3 elements, but got {voxel_size.size(0)}"
 
@@ -107,9 +115,14 @@ def mesh_to_flexible_dual_grid(
         if isinstance(grid_size, (list, tuple)):
             grid_size = np.array(grid_size)
         if isinstance(grid_size, np.ndarray):
-            grid_size = torch.tensor(grid_size, dtype=torch.int32, device=device)
+            grid_size_cpu = torch.tensor(grid_size, dtype=torch.int32)
+            grid_size = grid_size_cpu
+        else:
+            assert isinstance(grid_size, torch.Tensor), f"grid_size must be an int, list, tuple, np.ndarray, or torch.Tensor, but got {type(grid_size)}"
+            assert not grid_size.is_cuda, "grid_size Tensor metadata must be on CPU; pass Python values to avoid implicit CUDA sync"
+            grid_size_cpu = grid_size.to(dtype=torch.int32).contiguous()
         assert isinstance(grid_size, torch.Tensor), f"grid_size must be an int, list, tuple, np.ndarray, or torch.Tensor, but got {type(grid_size)}"
-        grid_size = grid_size.to(device=device, dtype=torch.int32).contiguous()
+        grid_size = grid_size_cpu.to(device=device).contiguous()
         assert grid_size.dim() == 1, f"grid_size must be a 1D tensor, but got {grid_size.shape}"
         assert grid_size.size(0) == 3, f"grid_size must have 3 elements, but got {grid_size.size(0)}"
 
@@ -117,9 +130,14 @@ def mesh_to_flexible_dual_grid(
         if isinstance(aabb, (list, tuple)):
             aabb = np.array(aabb)
         if isinstance(aabb, np.ndarray):
-            aabb = torch.tensor(aabb, dtype=torch.float32, device=device)
+            aabb_cpu = torch.tensor(aabb, dtype=torch.float32)
+            aabb = aabb_cpu
+        else:
+            assert isinstance(aabb, torch.Tensor), f"aabb must be a list, tuple, np.ndarray, or torch.Tensor, but got {type(aabb)}"
+            assert not aabb.is_cuda, "aabb Tensor metadata must be on CPU; pass Python values to avoid implicit CUDA sync"
+            aabb_cpu = aabb.to(dtype=torch.float32).contiguous()
         assert isinstance(aabb, torch.Tensor), f"aabb must be a list, tuple, np.ndarray, or torch.Tensor, but got {type(aabb)}"
-        aabb = aabb.to(device=device, dtype=torch.float32).contiguous()
+        aabb = aabb_cpu.to(device=device).contiguous()
         assert aabb.dim() == 2, f"aabb must be a 2D tensor, but got {aabb.shape}"
         assert aabb.size(0) == 2, f"aabb must have 2 rows, but got {aabb.size(0)}"
         assert aabb.size(1) == 3, f"aabb must have 3 columns, but got {aabb.size(1)}"
@@ -141,24 +159,33 @@ def mesh_to_flexible_dual_grid(
         aabb = torch.stack([min_xyz, max_xyz], dim=0).float().contiguous()
 
     # Fill voxel size or grid size
-    if voxel_size is None:
-        assert grid_size is not None
-        voxel_size = ((aabb[1] - aabb[0]) / grid_size).to(dtype=torch.float32).contiguous()
-    if grid_size is None:
-        assert voxel_size is not None
-        grid_size = ((aabb[1] - aabb[0]) / voxel_size).round().int()
-    grid_size = grid_size.to(device=device, dtype=torch.int32).contiguous()
+    if voxel_size_cpu is None:
+        assert grid_size_cpu is not None
+        if aabb_cpu is None:
+            assert not aabb.is_cuda, "CUDA inputs require CPU aabb or explicit voxel_size to avoid implicit CUDA sync"
+            aabb_cpu = aabb.detach()
+        voxel_size_cpu = ((aabb_cpu[1] - aabb_cpu[0]) / grid_size_cpu).to(dtype=torch.float32).contiguous()
+        voxel_size = voxel_size_cpu.to(device=device).contiguous()
+    if grid_size_cpu is None:
+        assert voxel_size_cpu is not None
+        if aabb_cpu is None:
+            assert not aabb.is_cuda, "CUDA inputs require CPU aabb or explicit grid_size to avoid implicit CUDA sync"
+            aabb_cpu = aabb.detach()
+        grid_size_cpu = ((aabb_cpu[1] - aabb_cpu[0]) / voxel_size_cpu).round().to(dtype=torch.int32).contiguous()
+        grid_size = grid_size_cpu.to(device=device).contiguous()
+    grid_size = grid_size_cpu.to(device=device).contiguous()
+    voxel_size_arg = [float(x) for x in voxel_size_cpu.tolist()]
+    grid_range_arg = [0, 0, 0] + [int(x) for x in grid_size_cpu.tolist()]
 
     # Shift mesh vertices into grid-local coordinates before calling C++/CUDA.
     vertices = vertices - aabb[0].reshape(1, 3)
-    grid_range = torch.stack([torch.zeros_like(grid_size), grid_size], dim=0).to(dtype=torch.int32).contiguous()
 
     if vertices.is_cuda:
         ret = _C.mesh_to_flexible_dual_grid_cuda(
             vertices,
             faces,
-            voxel_size,
-            grid_range,
+            voxel_size_arg,
+            grid_range_arg,
             face_weight,
             boundary_weight,
             regularization_weight,
@@ -167,8 +194,8 @@ def mesh_to_flexible_dual_grid(
         ret = _C.mesh_to_flexible_dual_grid_cpu(
             vertices,
             faces,
-            voxel_size,
-            grid_range,
+            voxel_size_arg,
+            grid_range_arg,
             face_weight,
             boundary_weight,
             regularization_weight,
@@ -206,6 +233,9 @@ def intersect_occ(
     device = vertices.device
     vertices = vertices.to(device=device, dtype=torch.float32).contiguous()
     faces = faces.to(device=device, dtype=torch.int32).contiguous()
+    voxel_size_cpu = None
+    grid_size_cpu = None
+    aabb_cpu = None
 
     if voxel_size is not None:
         if isinstance(voxel_size, float):
@@ -213,9 +243,14 @@ def intersect_occ(
         if isinstance(voxel_size, (list, tuple)):
             voxel_size = np.array(voxel_size)
         if isinstance(voxel_size, np.ndarray):
-            voxel_size = torch.tensor(voxel_size, dtype=torch.float32, device=device)
+            voxel_size_cpu = torch.tensor(voxel_size, dtype=torch.float32)
+            voxel_size = voxel_size_cpu
+        else:
+            assert isinstance(voxel_size, torch.Tensor), f"voxel_size must be a float, list, tuple, np.ndarray, or torch.Tensor, but got {type(voxel_size)}"
+            assert not voxel_size.is_cuda, "voxel_size Tensor metadata must be on CPU; pass Python values to avoid implicit CUDA sync"
+            voxel_size_cpu = voxel_size.to(dtype=torch.float32).contiguous()
         assert isinstance(voxel_size, torch.Tensor), f"voxel_size must be a float, list, tuple, np.ndarray, or torch.Tensor, but got {type(voxel_size)}"
-        voxel_size = voxel_size.to(device=device, dtype=torch.float32).contiguous()
+        voxel_size = voxel_size_cpu.to(device=device).contiguous()
         assert voxel_size.dim() == 1, f"voxel_size must be a 1D tensor, but got {voxel_size.shape}"
         assert voxel_size.size(0) == 3, f"voxel_size must have 3 elements, but got {voxel_size.size(0)}"
 
@@ -225,9 +260,14 @@ def intersect_occ(
         if isinstance(grid_size, (list, tuple)):
             grid_size = np.array(grid_size)
         if isinstance(grid_size, np.ndarray):
-            grid_size = torch.tensor(grid_size, dtype=torch.int32, device=device)
+            grid_size_cpu = torch.tensor(grid_size, dtype=torch.int32)
+            grid_size = grid_size_cpu
+        else:
+            assert isinstance(grid_size, torch.Tensor), f"grid_size must be an int, list, tuple, np.ndarray, or torch.Tensor, but got {type(grid_size)}"
+            assert not grid_size.is_cuda, "grid_size Tensor metadata must be on CPU; pass Python values to avoid implicit CUDA sync"
+            grid_size_cpu = grid_size.to(dtype=torch.int32).contiguous()
         assert isinstance(grid_size, torch.Tensor), f"grid_size must be an int, list, tuple, np.ndarray, or torch.Tensor, but got {type(grid_size)}"
-        grid_size = grid_size.to(device=device, dtype=torch.int32).contiguous()
+        grid_size = grid_size_cpu.to(device=device).contiguous()
         assert grid_size.dim() == 1, f"grid_size must be a 1D tensor, but got {grid_size.shape}"
         assert grid_size.size(0) == 3, f"grid_size must have 3 elements, but got {grid_size.size(0)}"
 
@@ -235,9 +275,14 @@ def intersect_occ(
         if isinstance(aabb, (list, tuple)):
             aabb = np.array(aabb)
         if isinstance(aabb, np.ndarray):
-            aabb = torch.tensor(aabb, dtype=torch.float32, device=device)
+            aabb_cpu = torch.tensor(aabb, dtype=torch.float32)
+            aabb = aabb_cpu
+        else:
+            assert isinstance(aabb, torch.Tensor), f"aabb must be a list, tuple, np.ndarray, or torch.Tensor, but got {type(aabb)}"
+            assert not aabb.is_cuda, "aabb Tensor metadata must be on CPU; pass Python values to avoid implicit CUDA sync"
+            aabb_cpu = aabb.to(dtype=torch.float32).contiguous()
         assert isinstance(aabb, torch.Tensor), f"aabb must be a list, tuple, np.ndarray, or torch.Tensor, but got {type(aabb)}"
-        aabb = aabb.to(device=device, dtype=torch.float32).contiguous()
+        aabb = aabb_cpu.to(device=device).contiguous()
         assert aabb.dim() == 2, f"aabb must be a 2D tensor, but got {aabb.shape}"
         assert aabb.size(0) == 2, f"aabb must have 2 rows, but got {aabb.size(0)}"
         assert aabb.size(1) == 3, f"aabb must have 3 columns, but got {aabb.size(1)}"
@@ -257,22 +302,31 @@ def intersect_occ(
 
         aabb = torch.stack([min_xyz, max_xyz], dim=0).float().contiguous()
 
-    if voxel_size is None:
-        assert grid_size is not None
-        voxel_size = ((aabb[1] - aabb[0]) / grid_size).to(dtype=torch.float32).contiguous()
-    if grid_size is None:
-        assert voxel_size is not None
-        grid_size = ((aabb[1] - aabb[0]) / voxel_size).round().int()
-    grid_size = grid_size.to(device=device, dtype=torch.int32).contiguous()
+    if voxel_size_cpu is None:
+        assert grid_size_cpu is not None
+        if aabb_cpu is None:
+            assert not aabb.is_cuda, "CUDA inputs require CPU aabb or explicit voxel_size to avoid implicit CUDA sync"
+            aabb_cpu = aabb.detach()
+        voxel_size_cpu = ((aabb_cpu[1] - aabb_cpu[0]) / grid_size_cpu).to(dtype=torch.float32).contiguous()
+        voxel_size = voxel_size_cpu.to(device=device).contiguous()
+    if grid_size_cpu is None:
+        assert voxel_size_cpu is not None
+        if aabb_cpu is None:
+            assert not aabb.is_cuda, "CUDA inputs require CPU aabb or explicit grid_size to avoid implicit CUDA sync"
+            aabb_cpu = aabb.detach()
+        grid_size_cpu = ((aabb_cpu[1] - aabb_cpu[0]) / voxel_size_cpu).round().to(dtype=torch.int32).contiguous()
+        grid_size = grid_size_cpu.to(device=device).contiguous()
+    grid_size = grid_size_cpu.to(device=device).contiguous()
+    voxel_size_arg = [float(x) for x in voxel_size_cpu.tolist()]
+    grid_range_arg = [0, 0, 0] + [int(x) for x in grid_size_cpu.tolist()]
 
     vertices = vertices - aabb[0].reshape(1, 3)
-    grid_range = torch.stack([torch.zeros_like(grid_size), grid_size], dim=0).to(dtype=torch.int32).contiguous()
     triangles = vertices[faces.to(dtype=torch.long)].contiguous()
 
     if vertices.is_cuda:
-        return _C.intersect_occ_cuda(triangles, voxel_size, grid_range)
+        return _C.intersect_occ_cuda(triangles, voxel_size_arg, grid_range_arg)
     else:
-        return _C.intersect_occ_cpu(triangles, voxel_size, grid_range)
+        return _C.intersect_occ_cpu(triangles, voxel_size_arg, grid_range_arg)
 
 
 def flexible_dual_grid_to_mesh(

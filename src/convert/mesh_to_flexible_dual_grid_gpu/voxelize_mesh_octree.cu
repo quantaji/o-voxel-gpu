@@ -532,8 +532,8 @@ namespace o_voxel::fdg
     voxelize_mesh_octree_cuda(
         const torch::Tensor &vertices,
         const torch::Tensor &faces,
-        const torch::Tensor &voxel_size,
-        const torch::Tensor &grid_range)
+        const std::vector<float> &voxel_size,
+        const std::vector<int64_t> &grid_range)
     {
         // Returns one row per primitive/voxel hit:
         // prim_ids [K] int32 and voxels [K, 3] int32.
@@ -553,12 +553,16 @@ namespace o_voxel::fdg
         if (num_vertices == 0 || num_faces == 0)
             return std::make_tuple(empty_prim, empty_voxels);
 
-        const float *voxel_size_ptr = voxel_size.data_ptr<float>();
-        const int32_t *grid_range_ptr = grid_range.data_ptr<int32_t>();
-        const float3 voxel_size_h{voxel_size_ptr[0], voxel_size_ptr[1], voxel_size_ptr[2]};
+        const float3 voxel_size_h{voxel_size[0], voxel_size[1], voxel_size[2]};
         const float3 inv_voxel_size{1.0f / voxel_size_h.x, 1.0f / voxel_size_h.y, 1.0f / voxel_size_h.z};
-        const Int3 grid_min{grid_range_ptr[0], grid_range_ptr[1], grid_range_ptr[2]};
-        const Int3 grid_max{grid_range_ptr[3], grid_range_ptr[4], grid_range_ptr[5]};
+        const Int3 grid_min{
+            static_cast<int32_t>(grid_range[0]),
+            static_cast<int32_t>(grid_range[1]),
+            static_cast<int32_t>(grid_range[2])};
+        const Int3 grid_max{
+            static_cast<int32_t>(grid_range[3]),
+            static_cast<int32_t>(grid_range[4]),
+            static_cast<int32_t>(grid_range[5])};
         const Int3 grid_size{grid_max.x - grid_min.x, grid_max.y - grid_min.y, grid_max.z - grid_min.z};
         const int d = grid_depth(grid_size);
         // d is the full leaf depth of the cubic octree that covers the grid.

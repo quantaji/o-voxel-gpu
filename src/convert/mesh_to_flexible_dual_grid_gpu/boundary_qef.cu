@@ -279,8 +279,8 @@ namespace o_voxel::fdg
 
     torch::Tensor boundary_qef_cuda(
         const torch::Tensor &boundaries,
-        const torch::Tensor &voxel_size,
-        const torch::Tensor &grid_range,
+        const std::vector<float> &voxel_size,
+        const std::vector<int64_t> &grid_range,
         float boundary_weight,
         const torch::Tensor &voxels,
         const torch::Tensor &qefs,
@@ -302,12 +302,16 @@ namespace o_voxel::fdg
         if (num_boundaries == 0 || num_voxels == 0 || boundary_weight <= 0.0f)
             return qefs;
 
-        const float *voxel_size_ptr = voxel_size.data_ptr<float>();
-        const int32_t *grid_range_ptr = grid_range.data_ptr<int32_t>();
         const GridSpec grid{
-            float3{voxel_size_ptr[0], voxel_size_ptr[1], voxel_size_ptr[2]},
-            Int3{grid_range_ptr[0], grid_range_ptr[1], grid_range_ptr[2]},
-            Int3{grid_range_ptr[3], grid_range_ptr[4], grid_range_ptr[5]},
+            float3{voxel_size[0], voxel_size[1], voxel_size[2]},
+            Int3{
+                static_cast<int32_t>(grid_range[0]),
+                static_cast<int32_t>(grid_range[1]),
+                static_cast<int32_t>(grid_range[2])},
+            Int3{
+                static_cast<int32_t>(grid_range[3]),
+                static_cast<int32_t>(grid_range[4]),
+                static_cast<int32_t>(grid_range[5])},
         };
         const BrickLookup lookup{
             brick_hash_keys.data_ptr<uint64_t>(),

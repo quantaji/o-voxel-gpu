@@ -11,14 +11,16 @@
 
 #pragma once
 #include <torch/extension.h>
+#include <cstdint>
+#include <vector>
 
 /**
  * Extract flexible dual grid from a triangle mesh.
  *
  * @param vertices: Tensor of shape (N, 3) containing vertex positions.
  * @param faces: Tensor of shape (M, 3) containing triangle vertex indices.
- * @param voxel_size: Tensor of shape (3,) containing the voxel size in each dimension.
- * @param grid_range: Tensor of shape (2, 3) containing the minimum and maximum coordinates of the grid range.
+ * @param voxel_size: Host vector of length 3 containing the voxel size in each dimension.
+ * @param grid_range: Host vector of length 6 containing the minimum and maximum coordinates of the grid range.
  * @param face_weight: Weight for the face edges in the QEM computation.
  * @param boundary_weight: Weight for the boundary edges in the QEM computation.
  * @param regularization_weight: Regularization factor to apply to the QEM matrices.
@@ -29,8 +31,8 @@
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> mesh_to_flexible_dual_grid_cpu(
     const torch::Tensor &vertices,
     const torch::Tensor &faces,
-    const torch::Tensor &voxel_size,
-    const torch::Tensor &grid_range,
+    const std::vector<float> &voxel_size,
+    const std::vector<int64_t> &grid_range,
     float face_weight,
     float boundary_weight,
     float regularization_weight,
@@ -45,8 +47,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> mesh_to_flexible_dual_gr
  */
 torch::Tensor intersect_occ_cpu(
     const torch::Tensor &triangles,
-    const torch::Tensor &voxel_size,
-    const torch::Tensor &grid_range);
+    const std::vector<float> &voxel_size,
+    const std::vector<int64_t> &grid_range);
 
 namespace o_voxel::fdg
 {
@@ -60,8 +62,8 @@ namespace o_voxel::fdg
      */
     torch::Tensor intersect_occ_cuda(
         const torch::Tensor &triangles,
-        const torch::Tensor &voxel_size,
-        const torch::Tensor &grid_range);
+        const std::vector<float> &voxel_size,
+        const std::vector<int64_t> &grid_range);
 
     /**
      * CUDA triangle intersection and QEF pass.
@@ -94,8 +96,8 @@ namespace o_voxel::fdg
         torch::Tensor>
     intersect_qef_cuda(
         const torch::Tensor &triangles,
-        const torch::Tensor &voxel_size,
-        const torch::Tensor &grid_range);
+        const std::vector<float> &voxel_size,
+        const std::vector<int64_t> &grid_range);
 
     /**
      * In-place CUDA face QEF accumulation.
@@ -106,8 +108,8 @@ namespace o_voxel::fdg
      */
     torch::Tensor face_qef_cuda(
         const torch::Tensor &triangles,
-        const torch::Tensor &voxel_size,
-        const torch::Tensor &grid_range,
+        const std::vector<float> &voxel_size,
+        const std::vector<int64_t> &grid_range,
         const torch::Tensor &voxels,
         const torch::Tensor &qefs,
         float face_weight,
@@ -125,8 +127,8 @@ namespace o_voxel::fdg
      */
     torch::Tensor boundary_qef_cuda(
         const torch::Tensor &boundaries,
-        const torch::Tensor &voxel_size,
-        const torch::Tensor &grid_range,
+        const std::vector<float> &voxel_size,
+        const std::vector<int64_t> &grid_range,
         float boundary_weight,
         const torch::Tensor &voxels,
         const torch::Tensor &qefs,
@@ -146,8 +148,8 @@ namespace o_voxel::fdg
     voxelize_mesh_octree_cuda(
         const torch::Tensor &vertices,
         const torch::Tensor &faces,
-        const torch::Tensor &voxel_size,
-        const torch::Tensor &grid_range);
+        const std::vector<float> &voxel_size,
+        const std::vector<int64_t> &grid_range);
 
     /**
      * Full CUDA flexible dual grid pipeline.
@@ -163,8 +165,8 @@ namespace o_voxel::fdg
     mesh_to_flexible_dual_grid_cuda(
         const torch::Tensor &vertices,
         const torch::Tensor &faces,
-        const torch::Tensor &voxel_size,
-        const torch::Tensor &grid_range,
+        const std::vector<float> &voxel_size,
+        const std::vector<int64_t> &grid_range,
         float face_weight,
         float boundary_weight,
         float regularization_weight);
