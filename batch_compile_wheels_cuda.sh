@@ -26,35 +26,35 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --out)
-            OUT_DIR_ARG="$2"
-            shift 2
-            ;;
-        --arch-list)
-            ARCH_LIST="$2"
-            shift 2
-            ;;
-        --dry-run)
-            DRY_RUN=1
-            shift
-            ;;
-        --keep-going)
-            FAIL_FAST=0
-            shift
-            ;;
-        --fail-fast)
-            FAIL_FAST=1
-            shift
-            ;;
-        -h|--help)
-            usage
-            exit 0
-            ;;
-        *)
-            echo "Unknown argument: $1" >&2
-            usage >&2
-            exit 2
-            ;;
+    --out)
+        OUT_DIR_ARG="$2"
+        shift 2
+        ;;
+    --arch-list)
+        ARCH_LIST="$2"
+        shift 2
+        ;;
+    --dry-run)
+        DRY_RUN=1
+        shift
+        ;;
+    --keep-going)
+        FAIL_FAST=0
+        shift
+        ;;
+    --fail-fast)
+        FAIL_FAST=1
+        shift
+        ;;
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    *)
+        echo "Unknown argument: $1" >&2
+        usage >&2
+        exit 2
+        ;;
     esac
 done
 

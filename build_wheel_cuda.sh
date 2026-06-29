@@ -17,7 +17,7 @@ Options:
   --torch VERSION       PyTorch version. Default: 2.4.0
   --cuda VERSION        CUDA version. Default: 11.8
   --out DIR             Output directory. Default: wheels
-  --arch-list LIST      TORCH_CUDA_ARCH_LIST. Default: auto by CUDA version.
+  --arch-list LIST      TORCH_CUDA_ARCH_LIST. Default: auto by PyTorch/CUDA version.
   -h, --help            Show this help message.
 
 Example:
@@ -27,35 +27,35 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --python)
-            PYTHON_VERSION="$2"
-            shift 2
-            ;;
-        --torch)
-            TORCH_VERSION="$2"
-            shift 2
-            ;;
-        --cuda)
-            CUDA_VERSION="$2"
-            shift 2
-            ;;
-        --out)
-            OUT_DIR_ARG="$2"
-            shift 2
-            ;;
-        --arch-list)
-            ARCH_LIST="$2"
-            shift 2
-            ;;
-        -h|--help)
-            usage
-            exit 0
-            ;;
-        *)
-            echo "Unknown argument: $1" >&2
-            usage >&2
-            exit 2
-            ;;
+    --python)
+        PYTHON_VERSION="$2"
+        shift 2
+        ;;
+    --torch)
+        TORCH_VERSION="$2"
+        shift 2
+        ;;
+    --cuda)
+        CUDA_VERSION="$2"
+        shift 2
+        ;;
+    --out)
+        OUT_DIR_ARG="$2"
+        shift 2
+        ;;
+    --arch-list)
+        ARCH_LIST="$2"
+        shift 2
+        ;;
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    *)
+        echo "Unknown argument: $1" >&2
+        usage >&2
+        exit 2
+        ;;
     esac
 done
 
@@ -77,71 +77,102 @@ torch_cuda_tag() {
 
 python_cp_tag() {
     case "$1" in
-        3.8) echo "cp38" ;;
-        3.9) echo "cp39" ;;
-        3.10) echo "cp310" ;;
-        3.11) echo "cp311" ;;
-        3.12) echo "cp312" ;;
-        3.13) echo "cp313" ;;
-        3.14) echo "cp314" ;;
-        *)
-            echo "Unsupported Python version: $1" >&2
-            echo "Add a Python tag mapping in python_cp_tag()." >&2
-            exit 2
-            ;;
+    3.8) echo "cp38" ;;
+    3.9) echo "cp39" ;;
+    3.10) echo "cp310" ;;
+    3.11) echo "cp311" ;;
+    3.12) echo "cp312" ;;
+    3.13) echo "cp313" ;;
+    3.14) echo "cp314" ;;
+    *)
+        echo "Unsupported Python version: $1" >&2
+        echo "Add a Python tag mapping in python_cp_tag()." >&2
+        exit 2
+        ;;
     esac
 }
 
 docker_image_for_cuda() {
     case "$1" in
-        11.8)
-            echo "nvidia/cuda:11.8.0-devel-ubuntu22.04"
-            ;;
-        12.1)
-            echo "nvidia/cuda:12.1.0-devel-ubuntu22.04"
-            ;;
-        12.4)
-            echo "nvidia/cuda:12.4.0-devel-ubuntu22.04"
-            ;;
-        12.6)
-            echo "nvidia/cuda:12.6.0-devel-ubuntu22.04"
-            ;;
-        12.8)
-            echo "nvidia/cuda:12.8.0-devel-ubuntu22.04"
-            ;;
-        12.9)
-            echo "nvidia/cuda:12.9.0-devel-ubuntu22.04"
-            ;;
-        13.0)
-            echo "nvidia/cuda:13.0.0-devel-ubuntu22.04"
-            ;;
-        *)
-            echo "Unsupported CUDA version: $1" >&2
-            echo "Add a Docker image mapping in docker_image_for_cuda()." >&2
-            exit 2
-            ;;
+    11.8)
+        echo "nvidia/cuda:11.8.0-devel-ubuntu22.04"
+        ;;
+    12.1)
+        echo "nvidia/cuda:12.1.0-devel-ubuntu22.04"
+        ;;
+    12.4)
+        echo "nvidia/cuda:12.4.0-devel-ubuntu22.04"
+        ;;
+    12.6)
+        echo "nvidia/cuda:12.6.0-devel-ubuntu22.04"
+        ;;
+    12.8)
+        echo "nvidia/cuda:12.8.0-devel-ubuntu22.04"
+        ;;
+    12.9)
+        echo "nvidia/cuda:12.9.0-devel-ubuntu22.04"
+        ;;
+    13.0)
+        echo "nvidia/cuda:13.0.0-devel-ubuntu22.04"
+        ;;
+    *)
+        echo "Unsupported CUDA version: $1" >&2
+        echo "Add a Docker image mapping in docker_image_for_cuda()." >&2
+        exit 2
+        ;;
     esac
 }
 
-default_arch_list_for_cuda() {
-    case "$1" in
-        11.8|12.1|12.4|12.6)
-            echo "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0+PTX"
-            ;;
-        12.8)
+default_arch_list_for_torch_cuda() {
+    local torch_version="$1"
+    local cuda_version="$2"
+    local torch_mm="${torch_version%.*}"
+
+    case "$cuda_version" in
+    11.8 | 12.1 | 12.4 | 12.6)
+        echo "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0+PTX"
+        ;;
+    12.8)
+        case "$torch_mm" in
+        2.7 | 2.8)
             echo "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0+PTX"
             ;;
-        12.9)
-            echo "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;10.3;12.0;12.1+PTX"
-            ;;
-        13.0)
-            echo "7.5;8.0;8.6;8.7;8.8;8.9;9.0;10.0;10.3;11.0;12.0;12.1+PTX"
+        2.9 | 2.10 | 2.11 | 2.12 | 2.13 | 2.14)
+            echo "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0;10.0;12.0+PTX"
             ;;
         *)
-            echo "Unsupported CUDA version: $1" >&2
-            echo "Add an arch list mapping in default_arch_list_for_cuda()." >&2
-            exit 2
+            echo "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0+PTX"
             ;;
+        esac
+        ;;
+    12.9)
+        case "$torch_mm" in
+        2.8)
+            echo "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;10.3;12.0;12.1+PTX"
+            ;;
+        2.9 | 2.10 | 2.11 | 2.12 | 2.13 | 2.14)
+            echo "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.3;12.0;12.1+PTX"
+            ;;
+        *)
+            echo "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0+PTX"
+            ;;
+        esac
+        ;;
+    13.0)
+        case "$torch_mm" in
+        2.9 | 2.10 | 2.11 | 2.12 | 2.13 | 2.14)
+            echo "7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.3;11.0;12.0;12.1+PTX"
+            ;;
+        *)
+            echo "7.5;8.0;8.6;8.7;8.9;9.0+PTX"
+            ;;
+        esac
+        ;;
+    *)
+        echo "Unsupported CUDA version: $cuda_version" >&2
+        echo "Add an arch list mapping in default_arch_list_for_torch_cuda()." >&2
+        exit 2
+        ;;
     esac
 }
 
@@ -160,7 +191,7 @@ TORCH_INDEX_URL="https://download.pytorch.org/whl/$TORCH_CUDA_TAG"
 DOCKER_IMAGE="$(docker_image_for_cuda "$CUDA_VERSION")"
 OVOXEL_VERSION="0.0.1+torch${TORCH_VERSION}.${TORCH_CUDA_TAG}"
 if [[ -z "$ARCH_LIST" ]]; then
-    ARCH_LIST="$(default_arch_list_for_cuda "$CUDA_VERSION")"
+    ARCH_LIST="$(default_arch_list_for_torch_cuda "$TORCH_VERSION" "$CUDA_VERSION")"
 fi
 HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
