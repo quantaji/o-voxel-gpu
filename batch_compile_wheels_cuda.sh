@@ -14,13 +14,13 @@ Usage:
 Options:
   --out DIR             Output directory passed to build_wheel_cuda.sh. Default: wheels
   --arch-list LIST      TORCH_CUDA_ARCH_LIST passed to build_wheel_cuda.sh.
-  --dry-run             Print the 200 build commands without running them.
+  --dry-run             Print the 225 build commands without running them.
   --keep-going          Accepted for compatibility. This is now the default.
   --fail-fast           Stop immediately after the first failed build.
   -h, --help            Show this help message.
 
-This script enumerates the 200 Linux x86_64 CUDA torch wheels found in the
-official PyTorch wheel indexes from torch 2.4.0 through 2.11.0, including cu129.
+This script enumerates the 225 Linux x86_64 CUDA torch wheels found in the
+official PyTorch wheel indexes from torch 2.4.0 through 2.12.1.
 EOF
 }
 
@@ -115,6 +115,11 @@ MATRIX=(
     "2.11.0|12.8|3.10 3.11 3.12 3.13 3.14"
     "2.11.0|12.9|3.10 3.11 3.12 3.13 3.14"
     "2.11.0|13.0|3.10 3.11 3.12 3.13 3.14"
+    "2.12.0|12.6|3.10 3.11 3.12 3.13 3.14"
+    "2.12.0|13.0|3.10 3.11 3.12 3.13 3.14"
+    "2.12.1|12.6|3.10 3.11 3.12 3.13 3.14"
+    "2.12.1|12.9|3.10 3.11 3.12 3.13 3.14"
+    "2.12.1|13.0|3.10 3.11 3.12 3.13 3.14"
 )
 
 build_args=()
@@ -131,8 +136,8 @@ for row in "${MATRIX[@]}"; do
 done
 
 echo "Total wheel builds: $total"
-if [[ "$total" -ne 200 ]]; then
-    echo "Internal matrix error: expected 200 builds." >&2
+if [[ "$total" -ne 225 ]]; then
+    echo "Internal matrix error: expected 225 builds." >&2
     exit 1
 fi
 
